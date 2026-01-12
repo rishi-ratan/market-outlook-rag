@@ -2,7 +2,8 @@ import os
 import json
 import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -12,6 +13,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 import chromadb
 from openai import OpenAI
+
+# Import LLM providers - try relative first, then absolute
+try:
+    from .llm_providers import get_provider
+except ImportError:
+    from llm_providers import get_provider
 
 # Load .env from repo root when present (platform deploys typically inject env vars)
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +66,7 @@ app.add_middleware(
 class AskRequest(BaseModel):
     question: str
     top_k: int = Field(default=8, ge=1, le=20)
+    provider: Optional[str] = Field(default="openai", description="LLM provider: 'openai' or 'together'")
 
 class Citation(BaseModel):
     chunk_id: str
@@ -70,6 +78,11 @@ class AskResponse(BaseModel):
     key_points: List[str]
     citations: List[Citation]
     not_found: bool
+    provider: Optional[str] = None
+
+class ComparisonResponse(BaseModel):
+    question: str
+    responses: List[AskResponse]
 
 # --- Citation enforcement helpers ---
 _NUM_TOKEN_RE = re.compile(r"(US\$\s?\d+(?:\.\d+)?\s?(?:billion|trillion)?)|(\$\s?\d+(?:\.\d+)?)|(\b\d+(?:\.\d+)?%\b)|(\b\d{4}\b)|(\b\d+(?:\.\d+)?\b)", re.IGNORECASE)
@@ -208,38 +221,13 @@ async def options_ask():
     # Return empty 200 - CORS middleware will add the headers
     return Response(status_code=200)
 
-@app.post("/ask", response_model=AskResponse)
-@app.post("/api/ask", response_model=AskResponse)
-def ask(req: AskRequest):
-    # 1) Embed query
-    q_emb = oai.embeddings.create(
-        model="text-embedding-3-small",
-        input=req.question
-    ).data[0].embedding
-
-    # 2) Retrieve chunks
-    results = col.query(
-        query_embeddings=[q_emb],
-        n_results=req.top_k,
-        include=["documents", "metadatas", "distances"]
-    )
-
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    distances = results["distances"][0] if "distances" in results else []
-
-    # Debug: log retrieved pages
-    retrieved_pages = [m["page"] for m in metas]
-    unique_pages = sorted(set(retrieved_pages))
-    print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
-    if retrieved_pages:
-        print(f"[DEBUG] Retrieved page range: {min(retrieved_pages)} - {max(retrieved_pages)} (out of all indexed pages)")
-
+def _generate_response(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict]) -> AskResponse:
+    """Generate a response using the specified provider."""
     context_blocks = []
     for d, m in zip(docs, metas):
         context_blocks.append(f"[{m['chunk_id']} | page {m['page']}]\n{d}")
 
-    # 3) Ask LLM (strict grounding + JSON output)
+    # System prompt (strict grounding + JSON output)
     system = (
         "You are a senior investment analyst at a venture capital firm. "
         "Answer questions using ONLY the provided report excerpts. "
@@ -277,7 +265,7 @@ def ask(req: AskRequest):
     )
 
     user = (
-        f"Question: {req.question}\n\n"
+        f"Question: {question}\n\n"
         "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
         "Schema:\n"
         "{"
@@ -298,36 +286,52 @@ def ask(req: AskRequest):
         "- answer should synthesize key_points with analytical depth, not just list facts\n"
     )
 
-    # Use GPT-4o-mini (fastest, most cost-effective available model)
-    # Set OPENAI_MODEL env var to override (e.g., "gpt-5-mini" if you have access)
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    llm = oai.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.0,  # Use 0.0 for maximum determinism and to prevent hallucinations
-        response_format={"type": "json_object"},  # Forces JSON, faster parsing
-    )
+    # Get LLM provider
+    try:
+        provider = get_provider(provider_name)
+    except Exception as e:
+        print(f"[ERROR] Failed to get provider {provider_name}: {e}")
+        return AskResponse(
+            answer=f"Error: Could not initialize {provider_name} provider. {str(e)}",
+            key_points=["Please check your API keys in .env file."],
+            citations=[],
+            not_found=True,
+            provider=provider_name,
+        )
 
-    raw = llm.choices[0].message.content.strip()
+    # Generate response
+    try:
+        raw = provider.generate(
+            system_prompt=system,
+            user_prompt=user,
+            temperature=0.0,
+            max_tokens=2048,
+        )
+    except Exception as e:
+        print(f"[ERROR] Provider {provider_name} generation failed: {e}")
+        return AskResponse(
+            answer=f"Error generating response from {provider_name}: {str(e)}",
+            key_points=["Please check your API keys and try again."],
+            citations=[],
+            not_found=True,
+            provider=provider_name,
+        )
 
-    # 4) Parse + validate JSON (fail loudly if not JSON)
+    # Parse + validate JSON
     try:
         data = json.loads(raw)
-    except Exception:
-        # If model returns non-JSON, return a safe fallback
+    except Exception as e:
+        print(f"[ERROR] Failed to parse JSON from {provider_name}: {e}")
         return AskResponse(
             answer="I could not format a valid JSON response.",
             key_points=["Try re-asking the question."],
             citations=[],
             not_found=True,
+            provider=provider_name,
         )
 
-    # 5) Validate citations: verify chunk_id and page match (quote can be paraphrased)
+    # Validate citations
     if "citations" in data and isinstance(data["citations"], list):
-        # Build lookup: chunk_id -> (page, document_text)
         chunk_lookup = {}
         for d, m in zip(docs, metas):
             chunk_lookup[m["chunk_id"]] = (m["page"], d)
@@ -338,11 +342,9 @@ def ask(req: AskRequest):
                 continue
             chunk_id = cit.get("chunk_id")
             page = cit.get("page")
-            quote = cit.get("quote", "").strip()
             
-            # Verify chunk_id exists and page matches (quote can be paraphrased, so we don't validate it)
             if chunk_id in chunk_lookup:
-                expected_page, doc_text = chunk_lookup[chunk_id]
+                expected_page, _ = chunk_lookup[chunk_id]
                 if page == expected_page:
                     validated_citations.append(cit)
                 else:
@@ -352,12 +354,13 @@ def ask(req: AskRequest):
         
         data["citations"] = validated_citations
 
-    # 6) Ensure every numeric/statistical token in answer/key_points is backed by at least one cited chunk.
-    # This prevents situations where the model states a number but forgets to include a citation for it.
+    # Ensure numeric citations
     try:
         data = _ensure_numeric_citations(data, docs, metas)
     except Exception as e:
         print(f"[WARN] Numeric citation enforcement failed: {e}")
+
+    data["provider"] = provider.get_provider_name()
 
     try:
         return AskResponse(**data)
@@ -368,4 +371,82 @@ def ask(req: AskRequest):
             key_points=["Try re-asking the question with a narrower scope."],
             citations=[],
             not_found=True,
+            provider=provider_name,
         )
+
+
+@app.post("/ask", response_model=AskResponse)
+@app.post("/api/ask", response_model=AskResponse)
+def ask(req: AskRequest):
+    # 1) Embed query
+    q_emb = oai.embeddings.create(
+        model="text-embedding-3-small",
+        input=req.question
+    ).data[0].embedding
+
+    # 2) Retrieve chunks
+    results = col.query(
+        query_embeddings=[q_emb],
+        n_results=req.top_k,
+        include=["documents", "metadatas", "distances"]
+    )
+
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+
+    # Debug: log retrieved pages
+    retrieved_pages = [m["page"] for m in metas]
+    unique_pages = sorted(set(retrieved_pages))
+    print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
+    if retrieved_pages:
+        print(f"[DEBUG] Retrieved page range: {min(retrieved_pages)} - {max(retrieved_pages)}")
+
+    # 3) Generate response using specified provider
+    return _generate_response(req.question, req.top_k, req.provider, docs, metas)
+
+
+@app.post("/ask/compare", response_model=ComparisonResponse)
+@app.post("/api/ask/compare", response_model=ComparisonResponse)
+def ask_compare(req: AskRequest):
+    """Compare responses from multiple providers."""
+    # 1) Embed query
+    q_emb = oai.embeddings.create(
+        model="text-embedding-3-small",
+        input=req.question
+    ).data[0].embedding
+
+    # 2) Retrieve chunks
+    results = col.query(
+        query_embeddings=[q_emb],
+        n_results=req.top_k,
+        include=["documents", "metadatas", "distances"]
+    )
+
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+
+    # Debug: log retrieved pages
+    retrieved_pages = [m["page"] for m in metas]
+    unique_pages = sorted(set(retrieved_pages))
+    print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
+
+    # 3) Generate responses from both providers in parallel
+    providers = ["openai", "together"]
+    
+    def generate_for_provider(provider_name: str) -> AskResponse:
+        try:
+            return _generate_response(req.question, req.top_k, provider_name, docs, metas)
+        except Exception as e:
+            print(f"[ERROR] Failed to generate response for {provider_name}: {e}")
+            return AskResponse(
+                answer=f"Error: {str(e)}",
+                key_points=["Provider error"],
+                citations=[],
+                not_found=True,
+                provider=provider_name,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(generate_for_provider, providers))
+
+    return ComparisonResponse(question=req.question, responses=responses)

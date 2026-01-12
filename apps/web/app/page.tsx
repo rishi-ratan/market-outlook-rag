@@ -14,6 +14,12 @@ type AskResponse = {
   key_points: string[];
   citations: Citation[];
   not_found: boolean;
+  provider?: string;
+};
+
+type ComparisonResponse = {
+  question: string;
+  responses: AskResponse[];
 };
 
 export default function Page() {
@@ -43,8 +49,11 @@ export default function Page() {
   const [warming, setWarming] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AskResponse | null>(null);
+  const [comparisonData, setComparisonData] = useState<ComparisonResponse | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [isFocused, setIsFocused] = useState(false);
+  const [provider, setProvider] = useState<"openai" | "together">("openai");
+  const [compareMode, setCompareMode] = useState(false);
 
   const [pdfOpen, setPdfOpen] = useState(false);
   const [pdfPage, setPdfPage] = useState<number>(1);
@@ -121,6 +130,7 @@ export default function Page() {
     e.preventDefault();
     setError(null);
     setData(null);
+    setComparisonData(null);
 
     const q = question.trim();
     if (!q) {
@@ -132,10 +142,15 @@ export default function Page() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/ask`, {
+      const endpoint = compareMode ? "/ask/compare" : "/ask";
+      const res = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, top_k: TOP_K }),
+        body: JSON.stringify({ 
+          question: q, 
+          top_k: TOP_K,
+          provider: compareMode ? undefined : provider,
+        }),
       });
 
       if (!res.ok) {
@@ -143,8 +158,13 @@ export default function Page() {
         throw new Error(`API error (${res.status}): ${text}`);
       }
 
-      const json = (await res.json()) as AskResponse;
-      setData(json);
+      if (compareMode) {
+        const json = (await res.json()) as ComparisonResponse;
+        setComparisonData(json);
+      } else {
+        const json = (await res.json()) as AskResponse;
+        setData(json);
+      }
     } catch (err: any) {
       setError(err?.message ?? "Something went wrong.");
     } finally {
@@ -215,7 +235,30 @@ export default function Page() {
                   />
                 </div>
 
-                <div className="flex justify-end gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={compareMode}
+                        onChange={(e) => setCompareMode(e.target.checked)}
+                        className="rounded border-zinc-700 bg-zinc-900 text-zinc-100 focus:ring-2 focus:ring-zinc-600"
+                      />
+                      <span>Compare providers</span>
+                    </label>
+                    {!compareMode && (
+                      <select
+                        value={provider}
+                        onChange={(e) => setProvider(e.target.value as "openai" | "together")}
+                        className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-600"
+                        aria-label="Select LLM provider"
+                        title="Select LLM provider"
+                      >
+                        <option value="openai">OpenAI (GPT-4o-mini)</option>
+                        <option value="together">Together AI (Qwen2.5-72B)</option>
+                      </select>
+                    )}
+                  </div>
                   <button
                     type="submit"
                     disabled={loading}
@@ -231,7 +274,7 @@ export default function Page() {
                         </span>
                       </span>
                     ) : (
-                      "Ask"
+                      compareMode ? "Compare" : "Ask"
                     )}
                   </button>
                 </div>
@@ -257,8 +300,75 @@ export default function Page() {
               </section>
             )}
 
-            {data && (
+            {comparisonData && (
+              <section className="mt-6 space-y-6 fade-in">
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
+                  <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+                    Comparison Results
+                  </div>
+                  <p className="text-lg text-zinc-300 mb-6">{comparisonData.question}</p>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {comparisonData.responses.map((response, idx) => (
+                      <div key={idx} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-5">
+                        <div className="mb-3 flex items-center justify-between">
+                          <div className="text-sm font-medium text-zinc-200">
+                            {response.provider || `Provider ${idx + 1}`}
+                          </div>
+                        </div>
+                        
+                        <div className="mb-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
+                            Answer
+                          </div>
+                          <p className="text-sm leading-6 text-zinc-100">
+                            {response.not_found ? "I cannot find this in the report." : response.answer}
+                          </p>
+                        </div>
+
+                        {response.key_points?.length > 0 && (
+                          <div className="mb-4">
+                            <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
+                              Key Points
+                            </div>
+                            <ul className="list-inside list-disc space-y-1 text-sm text-zinc-200">
+                              {response.key_points.map((kp, i) => (
+                                <li key={i}>{kp}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        <details className="mt-4">
+                          <summary className="cursor-pointer text-xs font-medium text-zinc-400 hover:text-zinc-200">
+                            Sources ({response.citations?.length ?? 0})
+                          </summary>
+                          <div className="mt-2 space-y-2">
+                            {response.citations?.map((c, i) => (
+                              <button
+                                key={`${c.chunk_id}-${i}`}
+                                type="button"
+                                onClick={() => openPdfAt(c.page, c.quote)}
+                                className="w-full text-left rounded-lg border border-zinc-800 bg-zinc-900/40 p-2 hover:bg-zinc-900/60 text-xs"
+                              >
+                                <div className="text-zinc-300">Page {c.page}</div>
+                                <div className="text-zinc-400 mt-1">"{c.quote}"</div>
+                              </button>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {data && !comparisonData && (
               <section className="mt-6 space-y-4 fade-in">
+                {data.provider && (
+                  <div className="text-xs text-zinc-500 mb-2">Provider: {data.provider}</div>
+                )}
                 <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
                   <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
                     Answer
@@ -304,7 +414,7 @@ export default function Page() {
                           </div>
                           <span className="text-xs text-zinc-500">Open PDF →</span>
                         </div>
-                        <div className="mt-2 text-sm text-zinc-200">“{c.quote}”</div>
+                        <div className="mt-2 text-sm text-zinc-200">"{c.quote}"</div>
                       </button>
                     ))}
                   </div>
