@@ -51,6 +51,10 @@ export default function Page() {
   const [data, setData] = useState<AskResponse | null>(null);
   const [comparisonData, setComparisonData] = useState<ComparisonResponse | null>(null);
   const [history, setHistory] = useState<string[]>([]);
+  const [conversationHistory, setConversationHistory] = useState<Array<{question: string; answer: string}>>([]);
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>(SUGGESTED_QUESTIONS);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [isFocused, setIsFocused] = useState(false);
   const [provider, setProvider] = useState<"openai" | "together">("openai");
   const [compareMode, setCompareMode] = useState(false);
@@ -58,11 +62,11 @@ export default function Page() {
   const [streamingAnswer, setStreamingAnswer] = useState("");
   const [streamingProvider, setStreamingProvider] = useState<string | null>(null);
   const [streamingComparison, setStreamingComparison] = useState<{
-    openai: { text: string; complete: boolean; response: AskResponse | null };
-    together: { text: string; complete: boolean; response: AskResponse | null };
+    openai: { text: string; complete: boolean; response: AskResponse | null; error: string | null };
+    together: { text: string; complete: boolean; response: AskResponse | null; error: string | null };
   }>({
-    openai: { text: "", complete: false, response: null },
-    together: { text: "", complete: false, response: null },
+    openai: { text: "", complete: false, response: null, error: null },
+    together: { text: "", complete: false, response: null, error: null },
   });
 
   const [pdfOpen, setPdfOpen] = useState(false);
@@ -110,6 +114,13 @@ export default function Page() {
       .finally(() => setWarming(false));
   }, [API_BASE]);
 
+  // Update suggested questions when conversation history changes
+  useEffect(() => {
+    if (conversationHistory.length === 0) {
+      setSuggestedQuestions(SUGGESTED_QUESTIONS);
+    }
+  }, [conversationHistory.length]);
+
   useEffect(() => {
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
@@ -128,6 +139,165 @@ export default function Page() {
     });
   }
 
+  function addToConversationHistory(question: string, answer: string) {
+    setConversationHistory((prev) => {
+      const newHistory = [...prev, { question, answer }];
+      // Keep only last 10 turns (5 Q&A pairs) to avoid token limits
+      const updated = newHistory.slice(-10);
+      // Update suggested questions after adding to history
+      setTimeout(() => updateSuggestedQuestions(question, answer), 100);
+      return updated;
+    });
+  }
+
+  async function updateSuggestedQuestions(lastQuestion?: string, lastAnswer?: string) {
+    // If no history, use default questions
+    if (conversationHistory.length === 0 && !lastQuestion) {
+      setSuggestedQuestions(SUGGESTED_QUESTIONS);
+      return;
+    }
+
+    setLoadingSuggestions(true);
+    try {
+      const historyToSend = lastQuestion && lastAnswer 
+        ? [...conversationHistory, { question: lastQuestion, answer: lastAnswer }]
+        : conversationHistory;
+
+      const res = await fetch(`${API_BASE}/suggest-questions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conversation_history: historyToSend.map(t => ({ question: t.question, answer: t.answer })),
+          last_answer: lastAnswer || (conversationHistory.length > 0 ? conversationHistory[conversationHistory.length - 1].answer : null),
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.questions && Array.isArray(data.questions)) {
+          setSuggestedQuestions(data.questions);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch suggested questions:", err);
+      // Keep current suggestions on error
+    } finally {
+      setLoadingSuggestions(false);
+    }
+  }
+
+  function clearConversation() {
+    setConversationHistory([]);
+    setSuggestedQuestions(SUGGESTED_QUESTIONS); // Reset to default questions
+    setExpandedTurns(new Set());
+    setData(null);
+    setComparisonData(null);
+    setStreamingAnswer("");
+    setStreamingProvider(null);
+    setStreamingComparison({
+      openai: { text: "", complete: false, response: null, error: null },
+      together: { text: "", complete: false, response: null, error: null },
+    });
+  }
+
+  function toggleTurnExpansion(idx: number) {
+    setExpandedTurns((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(idx)) {
+        newSet.delete(idx);
+      } else {
+        newSet.add(idx);
+      }
+      return newSet;
+    });
+  }
+
+  function copyConversation() {
+    const conversationText = conversationHistory
+      .map((turn, idx) => `Turn ${idx + 1}:\nQ: ${turn.question}\nA: ${turn.answer}\n`)
+      .join('\n---\n\n');
+    
+    navigator.clipboard.writeText(conversationText).then(() => {
+      // Show a brief success message (you could add a toast notification here)
+      alert('Conversation copied to clipboard!');
+    }).catch((err) => {
+      console.error('Failed to copy:', err);
+      alert('Failed to copy conversation');
+    });
+  }
+
+  async function exportConversationAsPDF() {
+    try {
+      // Dynamic import of jsPDF to avoid SSR issues
+      const { jsPDF } = await import('jspdf');
+      
+      const doc = new jsPDF();
+      let yPos = 20;
+      const pageHeight = doc.internal.pageSize.height;
+      const margin = 20;
+      const lineHeight = 7;
+      const maxWidth = doc.internal.pageSize.width - 2 * margin;
+
+      // Title
+      doc.setFontSize(16);
+      doc.setFont('helvetica', 'bold');
+      doc.text('Conversation History', margin, yPos);
+      yPos += 10;
+
+      // Date
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`Generated: ${new Date().toLocaleString()}`, margin, yPos);
+      yPos += 10;
+
+      // Conversation turns
+      doc.setFontSize(12);
+      conversationHistory.forEach((turn, idx) => {
+        // Check if we need a new page
+        if (yPos > pageHeight - 40) {
+          doc.addPage();
+          yPos = 20;
+        }
+
+        // Turn number
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text(`Turn ${idx + 1}`, margin, yPos);
+        yPos += lineHeight;
+
+        // Question
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        const questionLines = doc.splitTextToSize(`Q: ${turn.question}`, maxWidth);
+        doc.text(questionLines, margin, yPos);
+        yPos += questionLines.length * lineHeight + 3;
+
+        // Answer
+        doc.setFont('helvetica', 'normal');
+        const answerLines = doc.splitTextToSize(`A: ${turn.answer}`, maxWidth);
+        doc.text(answerLines, margin, yPos);
+        yPos += answerLines.length * lineHeight + 8;
+
+        // Separator (if not last)
+        if (idx < conversationHistory.length - 1) {
+          if (yPos > pageHeight - 20) {
+            doc.addPage();
+            yPos = 20;
+          }
+          doc.setDrawColor(200, 200, 200);
+          doc.line(margin, yPos, doc.internal.pageSize.width - margin, yPos);
+          yPos += 5;
+        }
+      });
+
+      // Save the PDF
+      doc.save(`conversation-${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (error) {
+      console.error('Failed to export PDF:', error);
+      alert('Failed to export PDF. Make sure jsPDF is installed: npm install jspdf');
+    }
+  }
+
   function applyQuestion(q: string) {
     setQuestion(q);
     setTimeout(() => {
@@ -144,8 +314,8 @@ export default function Page() {
     setStreamingAnswer("");
     setStreamingProvider(null);
     setStreamingComparison({
-      openai: { text: "", complete: false, response: null },
-      together: { text: "", complete: false, response: null },
+      openai: { text: "", complete: false, response: null, error: null },
+      together: { text: "", complete: false, response: null, error: null },
     });
 
     const q = question.trim();
@@ -168,6 +338,7 @@ export default function Page() {
             question: q, 
             top_k: TOP_K,
             provider: provider,
+            conversation_history: conversationHistory.length > 0 ? conversationHistory.map(t => ({ question: t.question, answer: t.answer })) : [],
           }),
         });
 
@@ -245,6 +416,7 @@ export default function Page() {
                   setData(response);
                   setStreamingAnswer("");
                   setStreamingProvider(response.provider || null);
+                  addToConversationHistory(q, response.answer);
                 } else if (data.type === "error") {
                   console.error("Streaming error:", data.message);
                   throw new Error(data.message || "Streaming error");
@@ -278,6 +450,7 @@ export default function Page() {
           body: JSON.stringify({ 
             question: q, 
             top_k: TOP_K,
+            conversation_history: conversationHistory.length > 0 ? conversationHistory.map(t => ({ question: t.question, answer: t.answer })) : [],
           }),
         });
 
@@ -341,9 +514,13 @@ export default function Page() {
                     responses,
                   });
                   setStreamingComparison({
-                    openai: { text: "", complete: false, response: null },
-                    together: { text: "", complete: false, response: null },
+                    openai: { text: "", complete: false, response: null, error: null },
+                    together: { text: "", complete: false, response: null, error: null },
                   });
+                  // For comparison, use the first response's answer for conversation history
+                  if (responses && responses.length > 0) {
+                    addToConversationHistory(q, responses[0].answer);
+                  }
                 } else if (data.type === "error") {
                   throw new Error(data.message || "Streaming error");
                 }
@@ -384,6 +561,7 @@ export default function Page() {
           question: q, 
           top_k: TOP_K,
           provider: compareMode ? undefined : provider,
+          conversation_history: conversationHistory.length > 0 ? conversationHistory.map(t => ({ question: t.question, answer: t.answer })) : [],
         }),
       });
 
@@ -395,9 +573,14 @@ export default function Page() {
       if (compareMode) {
         const json = (await res.json()) as ComparisonResponse;
         setComparisonData(json);
+        // For comparison, use the first response's answer for conversation history
+        if (json.responses && json.responses.length > 0) {
+          addToConversationHistory(q, json.responses[0].answer);
+        }
       } else {
         const json = (await res.json()) as AskResponse;
         setData(json);
+        addToConversationHistory(q, json.answer);
       }
     } catch (err: any) {
       setError(err?.message ?? "Something went wrong.");
@@ -413,7 +596,19 @@ export default function Page() {
       <div className="mx-auto max-w-6xl px-6 py-12">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr,360px]">
           <header className="mb-8 relative">
-            <div className="absolute top-0 right-0">
+            <div className="absolute top-0 right-0 flex items-center gap-3">
+              {conversationHistory.length > 0 && (
+                <button
+                  onClick={clearConversation}
+                  className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900/80 hover:text-zinc-100 transition-colors"
+                  title="Start a new conversation"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  New Conversation
+                </button>
+              )}
               <Link
                 href="/about"
                 className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900/80 hover:text-zinc-100 transition-colors"
@@ -447,6 +642,95 @@ export default function Page() {
             </p>
           </header>
           <div>
+            {/* Conversation History */}
+            {conversationHistory.length > 0 && (
+              <section className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
+                <div className="mb-4 flex items-center justify-between">
+                  <div className="text-sm font-medium uppercase tracking-wide text-zinc-400">
+                    Conversation History ({conversationHistory.length} {conversationHistory.length === 1 ? 'turn' : 'turns'})
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={copyConversation}
+                      className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors flex items-center gap-1"
+                      title="Copy conversation"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                      Copy
+                    </button>
+                    <button
+                      onClick={exportConversationAsPDF}
+                      className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors flex items-center gap-1"
+                      title="Export as PDF"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                      </svg>
+                      PDF
+                    </button>
+                    <button
+                      onClick={clearConversation}
+                      className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+                      title="Clear conversation"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-3 max-h-[600px] overflow-y-auto">
+                  {conversationHistory.map((turn, idx) => {
+                    const isExpanded = expandedTurns.has(idx);
+                    const answerPreview = turn.answer.length > 200 ? turn.answer.substring(0, 200) + '...' : turn.answer;
+                    const showExpandButton = turn.answer.length > 200;
+
+                    return (
+                      <div key={idx} className="space-y-2 border-l-2 border-zinc-700 pl-4 py-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1">
+                            <div className="text-sm font-medium text-zinc-300 mb-1">
+                              <span className="text-zinc-500">Q{idx + 1}:</span> {turn.question}
+                            </div>
+                            <div className="text-sm text-zinc-400">
+                              <span className="text-zinc-500">A:</span>{' '}
+                              {isExpanded ? (
+                                <span className="whitespace-pre-wrap">{turn.answer}</span>
+                              ) : (
+                                <span>{answerPreview}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        {showExpandButton && (
+                          <button
+                            onClick={() => toggleTurnExpansion(idx)}
+                            className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors flex items-center gap-1"
+                          >
+                            {isExpanded ? (
+                              <>
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                                </svg>
+                                Show less
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                                Show full answer
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
             <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
               <form ref={formRef} onSubmit={onAsk} className="space-y-4">
                 <div className="relative">
@@ -747,16 +1031,23 @@ export default function Page() {
                 Suggested questions
               </div>
               <div className="flex flex-wrap gap-2">
-                {SUGGESTED_QUESTIONS.map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    onClick={() => applyQuestion(q)}
-                    className="chip rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-900/60 focus:outline-none focus:ring-2 focus:ring-zinc-700"
-                  >
-                    {q}
-                  </button>
-                ))}
+                {loadingSuggestions ? (
+                  <div className="flex items-center gap-2 text-sm text-zinc-400">
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-400 border-t-transparent"></span>
+                    Generating suggestions...
+                  </div>
+                ) : (
+                  suggestedQuestions.map((q, idx) => (
+                    <button
+                      key={`${q}-${idx}`}
+                      type="button"
+                      onClick={() => applyQuestion(q)}
+                      className="chip rounded-full border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-900/60 focus:outline-none focus:ring-2 focus:ring-zinc-700 transition-colors"
+                    >
+                      {q}
+                    </button>
+                  ))
+                )}
               </div>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <p className="text-sm text-zinc-500">Tip: press Enter to submit, Shift+Enter for a new line.</p>

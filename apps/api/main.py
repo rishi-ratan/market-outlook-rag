@@ -66,10 +66,16 @@ app.add_middleware(
     max_age=3600,
 )
 
+class ConversationTurn(BaseModel):
+    question: str
+    answer: str
+
 class AskRequest(BaseModel):
     question: str
     top_k: int = Field(default=8, ge=1, le=20)
     provider: Optional[str] = Field(default="openai", description="LLM provider: 'openai' or 'together'")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation ID for maintaining context")
+    conversation_history: Optional[List[ConversationTurn]] = Field(default=[], description="Previous Q&A pairs for context")
 
 class Citation(BaseModel):
     chunk_id: str
@@ -86,6 +92,13 @@ class AskResponse(BaseModel):
 class ComparisonResponse(BaseModel):
     question: str
     responses: List[AskResponse]
+
+class SuggestedQuestionsRequest(BaseModel):
+    conversation_history: Optional[List[ConversationTurn]] = Field(default=[], description="Previous Q&A pairs for context")
+    last_answer: Optional[str] = Field(default=None, description="The most recent answer to generate follow-ups from")
+
+class SuggestedQuestionsResponse(BaseModel):
+    questions: List[str]
 
 # --- Citation enforcement helpers ---
 _NUM_TOKEN_RE = re.compile(r"(US\$\s?\d+(?:\.\d+)?\s?(?:billion|trillion)?)|(\$\s?\d+(?:\.\d+)?)|(\b\d+(?:\.\d+)?%\b)|(\b\d{4}\b)|(\b\d+(?:\.\d+)?\b)", re.IGNORECASE)
@@ -224,7 +237,7 @@ async def options_ask():
     # Return empty 200 - CORS middleware will add the headers
     return Response(status_code=200)
 
-def _generate_response(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict]) -> AskResponse:
+def _generate_response(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict], conversation_history: Optional[List[ConversationTurn]] = None) -> AskResponse:
     """Generate a response using the specified provider."""
     context_blocks = []
     for d, m in zip(docs, metas):
@@ -267,8 +280,18 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
         "answer, key_points, citations, not_found. "
     )
 
+    # Build conversation context if available
+    conversation_context = ""
+    if conversation_history and len(conversation_history) > 0:
+        conversation_context = "\n\nPrevious conversation:\n"
+        for i, turn in enumerate(conversation_history[-3:], 1):  # Include last 3 turns
+            conversation_context += f"Q{i}: {turn.question}\n"
+            conversation_context += f"A{i}: {turn.answer}\n\n"
+        conversation_context += "---\n\n"
+        conversation_context += "Current question (you may reference previous answers if relevant):\n"
+
     user = (
-        f"Question: {question}\n\n"
+        f"{conversation_context}Question: {question}\n\n"
         "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
         "Schema:\n"
         "{"
@@ -405,16 +428,26 @@ def ask(req: AskRequest):
         print(f"[DEBUG] Retrieved page range: {min(retrieved_pages)} - {max(retrieved_pages)}")
 
     # 3) Generate response using specified provider
-    return _generate_response(req.question, req.top_k, req.provider, docs, metas)
+    return _generate_response(req.question, req.top_k, req.provider, docs, metas, req.conversation_history)
 
 
-def _stream_generator(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict]):
+def _stream_generator(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict], conversation_history: Optional[List[ConversationTurn]] = None):
     """Generator function for streaming responses via SSE."""
     try:
         # Build context blocks
         context_blocks = []
         for d, m in zip(docs, metas):
             context_blocks.append(f"[{m['chunk_id']} | page {m['page']}]\n{d}")
+
+        # Build conversation context if available
+        conversation_context = ""
+        if conversation_history and len(conversation_history) > 0:
+            conversation_context = "\n\nPrevious conversation:\n"
+            for i, turn in enumerate(conversation_history[-3:], 1):  # Include last 3 turns
+                conversation_context += f"Q{i}: {turn.question}\n"
+                conversation_context += f"A{i}: {turn.answer}\n\n"
+            conversation_context += "---\n\n"
+            conversation_context += "Current question (you may reference previous answers if relevant):\n"
 
         # System and user prompts (same as _generate_response)
         system = (
@@ -454,7 +487,7 @@ def _stream_generator(question: str, top_k: int, provider_name: str, docs: List[
         )
 
         user = (
-            f"Question: {question}\n\n"
+            f"{conversation_context}Question: {question}\n\n"
             "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
             "Schema:\n"
             "{"
@@ -559,7 +592,7 @@ def ask_stream(req: AskRequest):
     print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
 
     return StreamingResponse(
-        _stream_generator(req.question, req.top_k, req.provider, docs, metas),
+        _stream_generator(req.question, req.top_k, req.provider, docs, metas, req.conversation_history),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -617,8 +650,12 @@ def _stream_compare_generator(question: str, top_k: int, docs: List[str], metas:
                 "answer, key_points, citations, not_found. "
             )
 
+            # Build conversation context if available (for comparison, we'll use empty history for now)
+            # Could be enhanced to support conversation history in comparison mode
+            conversation_context = ""
+            
             user = (
-                f"Question: {question}\n\n"
+                f"{conversation_context}Question: {question}\n\n"
                 "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
                 "Schema:\n"
                 "{"
@@ -852,7 +889,7 @@ def ask_compare(req: AskRequest):
     
     def generate_for_provider(provider_name: str) -> AskResponse:
         try:
-            return _generate_response(req.question, req.top_k, provider_name, docs, metas)
+            return _generate_response(req.question, req.top_k, provider_name, docs, metas, req.conversation_history)
         except Exception as e:
             print(f"[ERROR] Failed to generate response for {provider_name}: {e}")
             return AskResponse(
@@ -867,3 +904,94 @@ def ask_compare(req: AskRequest):
         responses = list(executor.map(generate_for_provider, providers))
 
     return ComparisonResponse(question=req.question, responses=responses)
+
+
+@app.post("/suggest-questions", response_model=SuggestedQuestionsResponse)
+@app.post("/api/suggest-questions", response_model=SuggestedQuestionsResponse)
+def suggest_questions(req: SuggestedQuestionsRequest):
+    """Generate contextual follow-up questions based on conversation history."""
+    # Default questions if no history
+    default_questions = [
+        "What does the report say about the secondaries market and liquidity?",
+        "What does the report say about the outlook for real estate sectors like data centers and life sciences, and what demand drivers does it cite?",
+        "What are the key risks and opportunities discussed for private credit?",
+        "What does the report highlight about infrastructure and energy transition?",
+    ]
+    
+    # If no conversation history, return default questions
+    if not req.conversation_history or len(req.conversation_history) == 0:
+        return SuggestedQuestionsResponse(questions=default_questions)
+    
+    # Generate contextual follow-up questions using LLM
+    try:
+        # Get the last Q&A pair for context
+        last_turn = req.conversation_history[-1]
+        context = f"Previous question: {last_turn.question}\nPrevious answer: {last_turn.answer[:500]}"  # Limit answer length
+        
+        # If there are more turns, include them
+        if len(req.conversation_history) > 1:
+            context += "\n\nEarlier conversation:\n"
+            for turn in req.conversation_history[-3:-1]:  # Last 2 before the most recent
+                context += f"Q: {turn.question}\nA: {turn.answer[:200]}\n\n"
+        
+        system_prompt = (
+            "You are a helpful assistant that generates relevant follow-up questions for a document Q&A system. "
+            "Based on the conversation history, generate 4 concise, specific follow-up questions that would help the user "
+            "dive deeper into the topics discussed. "
+            "Questions should be: "
+            "- Specific and actionable (not vague like 'tell me more') "
+            "- Grounded in the previous answers (reference specific topics mentioned) "
+            "- Varied (cover different aspects: details, risks, comparisons, implications) "
+            "- Investor-focused and analytical "
+            "Return ONLY a JSON array of exactly 4 question strings, no other text."
+        )
+        
+        user_prompt = (
+            f"{context}\n\n"
+            "Generate 4 follow-up questions that would help explore this topic further. "
+            "Return as JSON array: [\"question1\", \"question2\", \"question3\", \"question4\"]"
+        )
+        
+        # Use OpenAI for question generation (fast and reliable)
+        provider = get_provider("openai")
+        response_text = provider.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.7,  # Slightly more creative for question generation
+            max_tokens=300
+        )
+        
+        # Try to extract JSON array
+        try:
+            # Look for JSON array in response
+            json_match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+            if json_match:
+                questions = json.loads(json_match.group())
+                if isinstance(questions, list) and len(questions) >= 4:
+                    return SuggestedQuestionsResponse(questions=questions[:4])
+        except:
+            pass
+        
+        # Fallback: try to extract questions from text
+        questions = []
+        lines = response_text.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line and ('?' in line or line.startswith('"') or line.startswith("'")):
+                # Clean up the line
+                line = line.strip('"\'[]').strip()
+                if line and len(line) > 10 and '?' in line:
+                    questions.append(line)
+                    if len(questions) >= 4:
+                        break
+        
+        if len(questions) >= 4:
+            return SuggestedQuestionsResponse(questions=questions[:4])
+        else:
+            # Fallback to default if generation fails
+            return SuggestedQuestionsResponse(questions=default_questions)
+            
+    except Exception as e:
+        print(f"[ERROR] Failed to generate suggested questions: {e}")
+        # Fallback to default questions on error
+        return SuggestedQuestionsResponse(questions=default_questions)
