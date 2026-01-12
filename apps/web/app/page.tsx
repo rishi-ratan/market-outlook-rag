@@ -54,6 +54,16 @@ export default function Page() {
   const [isFocused, setIsFocused] = useState(false);
   const [provider, setProvider] = useState<"openai" | "together">("openai");
   const [compareMode, setCompareMode] = useState(false);
+  const [streamMode, setStreamMode] = useState(true);
+  const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [streamingProvider, setStreamingProvider] = useState<string | null>(null);
+  const [streamingComparison, setStreamingComparison] = useState<{
+    openai: { text: string; complete: boolean; response: AskResponse | null };
+    together: { text: string; complete: boolean; response: AskResponse | null };
+  }>({
+    openai: { text: "", complete: false, response: null },
+    together: { text: "", complete: false, response: null },
+  });
 
   const [pdfOpen, setPdfOpen] = useState(false);
   const [pdfPage, setPdfPage] = useState<number>(1);
@@ -131,6 +141,12 @@ export default function Page() {
     setError(null);
     setData(null);
     setComparisonData(null);
+    setStreamingAnswer("");
+    setStreamingProvider(null);
+    setStreamingComparison({
+      openai: { text: "", complete: false, response: null },
+      together: { text: "", complete: false, response: null },
+    });
 
     const q = question.trim();
     if (!q) {
@@ -140,6 +156,224 @@ export default function Page() {
 
     pushHistory(q);
 
+    // Handle streaming mode for single provider
+    if (streamMode && !compareMode) {
+      setLoading(true);
+      try {
+        // Use fetch with ReadableStream for POST (EventSource only supports GET)
+        const res = await fetch(`${API_BASE}/ask/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            question: q, 
+            top_k: TOP_K,
+            provider: provider,
+          }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error (${res.status}): ${text}`);
+        }
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let accumulatedText = "";
+
+        if (!reader) {
+          throw new Error("No response body");
+        }
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === "chunk") {
+                  accumulatedText += data.content;
+                  console.log("Streaming chunk:", data.content);
+                  
+                  // Try to extract answer from partial JSON
+                  try {
+                    // Look for "answer":"... in the accumulated text (handle escaped quotes)
+                    // More robust regex that handles partial JSON
+                    const answerMatch = accumulatedText.match(/"answer"\s*:\s*"((?:[^"\\]|\\.|")*?)(?:"|$)/);
+                    if (answerMatch && answerMatch[1]) {
+                      // Unescape JSON string
+                      let answerText = answerMatch[1]
+                        .replace(/\\n/g, '\n')
+                        .replace(/\\"/g, '"')
+                        .replace(/\\\\/g, '\\')
+                        .replace(/\\t/g, '\t')
+                        .replace(/\\r/g, '\r');
+                      
+                      // If we're still building the answer (no closing quote yet), show what we have
+                      if (!accumulatedText.includes('"answer"') || accumulatedText.indexOf('"answer"') < accumulatedText.lastIndexOf('"')) {
+                        setStreamingAnswer(answerText);
+                        console.log("Extracted answer so far:", answerText.substring(0, 50) + "...");
+                      } else {
+                        setStreamingAnswer(answerText);
+                      }
+                    } else {
+                      // Show raw JSON being built (so user sees something happening)
+                      // But only show a preview to avoid overwhelming
+                      const preview = accumulatedText.length > 200 
+                        ? accumulatedText.substring(0, 200) + "..." 
+                        : accumulatedText;
+                      setStreamingAnswer("Building response...\n\n" + preview);
+                    }
+                  } catch (e) {
+                    // If parsing fails, show accumulated text preview
+                    const preview = accumulatedText.length > 200 
+                      ? accumulatedText.substring(0, 200) + "..." 
+                      : accumulatedText;
+                    setStreamingAnswer("Building response...\n\n" + preview);
+                    console.error("Error extracting answer:", e);
+                  }
+                } else if (data.type === "complete") {
+                  console.log("Streaming complete, received full response");
+                  const response = data.response as AskResponse;
+                  setData(response);
+                  setStreamingAnswer("");
+                  setStreamingProvider(response.provider || null);
+                } else if (data.type === "error") {
+                  console.error("Streaming error:", data.message);
+                  throw new Error(data.message || "Streaming error");
+                }
+              } catch (e) {
+                console.error("Error parsing SSE data:", e, "Line:", line);
+              }
+            } else if (line.trim()) {
+              // Log non-data lines for debugging
+              console.log("Non-data line:", line);
+            }
+          }
+        }
+        console.log("Streaming finished, total accumulated:", accumulatedText.length, "chars");
+      } catch (err: any) {
+        console.error("Streaming error:", err);
+        setError(err?.message ?? "Something went wrong.");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Handle streaming mode for comparison
+    if (streamMode && compareMode) {
+      setLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/ask/compare/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ 
+            question: q, 
+            top_k: TOP_K,
+          }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`API error (${res.status}): ${text}`);
+        }
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        if (!reader) {
+          throw new Error("No response body");
+        }
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === "chunk") {
+                  const provider = data.provider as "openai" | "together";
+                  setStreamingComparison(prev => {
+                    const updated = { ...prev };
+                    updated[provider].text += data.content;
+                    // Try to extract answer
+                    try {
+                      const answerMatch = updated[provider].text.match(/"answer"\s*:\s*"((?:[^"\\]|\\.|")*?)(?:"|$)/);
+                      if (answerMatch && answerMatch[1]) {
+                        const answerText = answerMatch[1]
+                          .replace(/\\n/g, '\n')
+                          .replace(/\\"/g, '"')
+                          .replace(/\\\\/g, '\\')
+                          .replace(/\\t/g, '\t')
+                          .replace(/\\r/g, '\r');
+                        updated[provider].text = answerText;
+                      }
+                    } catch {}
+                    return updated;
+                  });
+                } else if (data.type === "provider_complete") {
+                  const provider = data.provider as "openai" | "together";
+                  const response = data.response as AskResponse;
+                  setStreamingComparison(prev => ({
+                    ...prev,
+                    [provider]: { ...prev[provider], complete: true, response },
+                  }));
+                } else if (data.type === "complete") {
+                  const responses = data.responses as AskResponse[];
+                  setComparisonData({
+                    question: data.question,
+                    responses,
+                  });
+                  setStreamingComparison({
+                    openai: { text: "", complete: false, response: null },
+                    together: { text: "", complete: false, response: null },
+                  });
+                } else if (data.type === "error") {
+                  throw new Error(data.message || "Streaming error");
+                }
+              } catch (e) {
+                console.error("Error parsing SSE data:", e);
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.error("Streaming comparison error:", err);
+        setError(err?.message ?? "Network error. Check console for details.");
+        // Try to show partial results if any
+        const partialResponses = [
+          streamingComparison.openai.response,
+          streamingComparison.together.response,
+        ].filter(r => r !== null) as AskResponse[];
+        if (partialResponses.length > 0) {
+          setComparisonData({
+            question: q,
+            responses: partialResponses,
+          });
+        }
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Non-streaming mode (existing logic)
     setLoading(true);
     try {
       const endpoint = compareMode ? "/ask/compare" : "/ask";
@@ -258,6 +492,15 @@ export default function Page() {
                         <option value="together">Together AI (Qwen2.5-72B)</option>
                       </select>
                     )}
+                    <label className="flex items-center gap-2 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={streamMode}
+                        onChange={(e) => setStreamMode(e.target.checked)}
+                        className="rounded border-zinc-700 bg-zinc-900 text-zinc-100 focus:ring-2 focus:ring-zinc-600"
+                      />
+                      <span>Stream response</span>
+                    </label>
                   </div>
                   <button
                     type="submit"
@@ -296,6 +539,52 @@ export default function Page() {
                   <div className="h-4 w-5/6 rounded bg-zinc-800/60 animate-pulse" />
                   <div className="h-4 w-4/6 rounded bg-zinc-800/50 animate-pulse" />
                   <div className="h-4 w-3/6 rounded bg-zinc-800/40 animate-pulse" />
+                </div>
+              </section>
+            )}
+
+            {/* Show streaming comparison */}
+            {loading && streamMode && compareMode && (
+              <section className="mt-6 space-y-6 fade-in">
+                <div className="rounded-2xl border-2 border-green-500/50 bg-zinc-900/40 p-7 shadow-lg shadow-green-500/10">
+                  <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+                    <span className="inline-flex items-center gap-2">
+                      <span className="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse"></span>
+                      Streaming Comparison
+                    </span>
+                  </div>
+                  <p className="text-lg text-zinc-300 mb-6">{question}</p>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {(["openai", "together"] as const).map((provider) => (
+                      <div key={provider} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-5">
+                        <div className="mb-3 flex items-center justify-between">
+                          <div className="text-sm font-medium text-zinc-200">
+                            {provider === "openai" ? "OpenAI (GPT-4o-mini)" : "Together AI (Qwen2.5-72B)"}
+                          </div>
+                          {streamingComparison[provider].complete ? (
+                            <span className="text-xs text-green-400">✓ Complete</span>
+                          ) : (
+                            <span className="text-xs text-yellow-400 animate-pulse">Streaming...</span>
+                          )}
+                        </div>
+                        
+                        <div className="mb-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
+                            Answer
+                          </div>
+                          <div className="text-sm leading-6 text-zinc-100 whitespace-pre-wrap min-h-[80px]">
+                            {streamingComparison[provider].text || (
+                              <span className="text-zinc-500 italic">Waiting for response...</span>
+                            )}
+                            {!streamingComparison[provider].complete && (
+                              <span className="inline-block w-2 h-4 bg-green-400 ml-1 animate-pulse">|</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </section>
             )}
@@ -359,6 +648,34 @@ export default function Page() {
                         </details>
                       </div>
                     ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* Show streaming answer while streaming */}
+            {loading && streamMode && !compareMode && (
+              <section className="mt-6 space-y-4 fade-in">
+                <div className="text-xs text-zinc-500 mb-2">
+                  {streamingProvider ? `Provider: ${streamingProvider} ` : ""}
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2 w-2 rounded-full bg-green-400 animate-pulse"></span>
+                    <span className="font-medium text-green-400">Streaming response...</span>
+                  </span>
+                </div>
+                <div className="rounded-2xl border-2 border-green-500/50 bg-zinc-900/40 p-7 shadow-lg shadow-green-500/10">
+                  <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+                    Answer {streamingAnswer ? `(${streamingAnswer.length} characters)` : "(waiting for response...)"}
+                  </div>
+                  <div className="text-lg leading-8 text-zinc-100 whitespace-pre-wrap min-h-[100px]">
+                    {streamingAnswer ? (
+                      <>
+                        {streamingAnswer}
+                        <span className="inline-block w-2 h-5 bg-green-400 ml-1 animate-pulse">|</span>
+                      </>
+                    ) : (
+                      <span className="text-zinc-500 italic">Waiting for response to start streaming...</span>
+                    )}
                   </div>
                 </div>
               </section>

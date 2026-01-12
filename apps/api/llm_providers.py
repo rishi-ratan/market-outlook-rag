@@ -3,7 +3,7 @@ LLM Provider abstraction for supporting multiple LLM backends.
 """
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Generator
 from openai import OpenAI
 
 
@@ -20,6 +20,18 @@ class LLMProvider(ABC):
     ) -> str:
         """Generate a response from the LLM."""
         pass
+
+    def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+    ) -> Generator[str, None, None]:
+        """Generate a streaming response from the LLM. Default implementation falls back to non-streaming."""
+        # Default: fall back to non-streaming and yield the full response
+        response = self.generate(system_prompt, user_prompt, temperature, max_tokens)
+        yield response
 
     @abstractmethod
     def get_provider_name(self) -> str:
@@ -58,6 +70,33 @@ class OpenAIProvider(LLMProvider):
             return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"[ERROR] OpenAI API error: {e}")
+            raise
+
+    def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+    ) -> Generator[str, None, None]:
+        """Generate a streaming response from OpenAI."""
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            print(f"[ERROR] OpenAI streaming error: {e}")
             raise
 
     def get_provider_name(self) -> str:
@@ -99,6 +138,33 @@ class TogetherAIProvider(LLMProvider):
             return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"[ERROR] Together AI API error: {e}")
+            raise
+
+    def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+    ) -> Generator[str, None, None]:
+        """Generate a streaming response from Together AI."""
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            print(f"[ERROR] Together AI streaming error: {e}")
             raise
 
     def get_provider_name(self) -> str:

@@ -1,6 +1,8 @@
 import os
 import json
 import re
+import queue
+import threading
 from pathlib import Path
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -8,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
+import asyncio
 
 import chromadb
 from openai import OpenAI
@@ -403,6 +406,420 @@ def ask(req: AskRequest):
 
     # 3) Generate response using specified provider
     return _generate_response(req.question, req.top_k, req.provider, docs, metas)
+
+
+def _stream_generator(question: str, top_k: int, provider_name: str, docs: List[str], metas: List[dict]):
+    """Generator function for streaming responses via SSE."""
+    try:
+        # Build context blocks
+        context_blocks = []
+        for d, m in zip(docs, metas):
+            context_blocks.append(f"[{m['chunk_id']} | page {m['page']}]\n{d}")
+
+        # System and user prompts (same as _generate_response)
+        system = (
+            "You are a senior investment analyst at a venture capital firm. "
+            "Answer questions using ONLY the provided report excerpts. "
+
+            "IMPORTANT: Your answer can paraphrase and synthesize information naturally. "
+            "The 'answer' field can paraphrase or synthesize for readability, but every factual claim must be grounded in citations. "
+            "Citations are required to show sources - the 'quote' field can be a brief summary or reference to the relevant content, not necessarily an exact quote. "
+
+            "Write in a crisp, investor-ready style with analytical depth. "
+            "Imagine the reader is an experienced investor who is familiar with the report and the industry. "
+            "The 'answer' should be structured to: lead with the main finding, provide reasoning and causal drivers, "
+            "include concrete specifics (numbers, trends, mechanisms), and synthesize across excerpts when relevant. "
+            "Aim for 3–6 sentences that balance conciseness with depth. "
+            "Avoid vague filler (e.g., 'significantly', 'rapidly') unless the context uses it. "
+
+            "The 'key_points' should complement the answer with discrete, actionable insights. "
+
+            "CRITICAL CITATION REQUIREMENTS: "
+            "You MUST provide citations ONLY in the 'citations' field — never inside the prose of the 'answer' or 'key_points'. "
+            "The 'answer' and 'key_points' must read cleanly with NO inline citations, page references, or chunk IDs. "
+
+            "Every factual claim, statistic, or specific detail in the answer MUST still be backed by a citation, "
+            "but those citations must appear exclusively in the 'citations' array. "
+
+            "If multiple facts are used, include multiple citation objects — one per fact — in the 'citations' array. "
+            "Do NOT include citations in parentheses or inline text. "
+
+            "The 'citations' field must still include: chunk_id, page, and a short quote or summary. "
+            "You MUST ground every factual claim in the provided context. "
+            "If synthesizing across multiple excerpts, do so explicitly (e.g., 'Across excerpts A and B...'). "
+            "If the report does NOT clearly contain the answer, set not_found=true and say you cannot find it in the report. "
+            "Do NOT infer, estimate, or use outside knowledge. "
+            "Return ONLY valid JSON matching the provided schema, and ALWAYS include all four top-level keys: "
+            "answer, key_points, citations, not_found. "
+        )
+
+        user = (
+            f"Question: {question}\n\n"
+            "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
+            "Schema:\n"
+            "{"
+            "\"answer\": string, "
+            "\"key_points\": array of strings, "
+            "\"citations\": array of {\"chunk_id\": string, \"page\": number, \"quote\": string}, "
+            "\"not_found\": boolean"
+            "}\n\n"
+            "Constraints:\n"
+            "- quote can be a brief summary or reference (<= 25 words) - does NOT need to be exact quote\n"
+            "- chunk_id must match EXACTLY a chunk_id shown in the Context blocks above\n"
+            "- page number must match EXACTLY the page number shown for that chunk_id in Context\n"
+            "- citations must reference only chunk_ids and pages shown in Context\n"
+            "- CRITICAL: Every number, statistic, specific fact, or claim in your answer MUST have a citation\n"
+            "- If your answer mentions multiple facts from different chunks, include multiple citations (one per fact)\n"
+            "- If not_found=true, citations should be an empty array\n"
+            "- answer must be 3-6 sentences with structure: main finding → reasoning → specifics\n"
+            "- answer should synthesize key_points with analytical depth, not just list facts\n"
+        )
+
+        # Get provider
+        provider = get_provider(provider_name)
+        
+        # Stream response
+        accumulated_text = ""
+        for chunk in provider.generate_stream(system, user, temperature=0.0, max_tokens=2048):
+            accumulated_text += chunk
+            # Send chunk as SSE event (escape newlines in JSON)
+            chunk_data = json.dumps({'type': 'chunk', 'content': chunk})
+            yield f"data: {chunk_data}\n\n"
+
+        # Parse complete JSON
+        try:
+            data = json.loads(accumulated_text)
+        except json.JSONDecodeError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to parse JSON response'})}\n\n"
+            return
+
+        # Validate citations
+        if "citations" in data and isinstance(data["citations"], list):
+            chunk_lookup = {}
+            for d, m in zip(docs, metas):
+                chunk_lookup[m["chunk_id"]] = (m["page"], d)
+            
+            validated_citations = []
+            for cit in data["citations"]:
+                if not isinstance(cit, dict):
+                    continue
+                chunk_id = cit.get("chunk_id")
+                page = cit.get("page")
+                
+                if chunk_id in chunk_lookup:
+                    expected_page, _ = chunk_lookup[chunk_id]
+                    if page == expected_page:
+                        validated_citations.append(cit)
+            
+            data["citations"] = validated_citations
+
+        # Ensure numeric citations
+        try:
+            data = _ensure_numeric_citations(data, docs, metas)
+        except Exception as e:
+            print(f"[WARN] Numeric citation enforcement failed: {e}")
+
+        data["provider"] = provider.get_provider_name()
+
+        # Send final structured response
+        try:
+            response = AskResponse(**data)
+            yield f"data: {json.dumps({'type': 'complete', 'response': response.model_dump()})}\n\n"
+        except ValidationError as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Response validation failed'})}\n\n"
+
+    except Exception as e:
+        print(f"[ERROR] Streaming error: {e}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+
+@app.post("/ask/stream")
+@app.post("/api/ask/stream")
+def ask_stream(req: AskRequest):
+    """Stream response using Server-Sent Events (SSE)."""
+    # 1) Embed query
+    q_emb = oai.embeddings.create(
+        model="text-embedding-3-small",
+        input=req.question
+    ).data[0].embedding
+
+    # 2) Retrieve chunks
+    results = col.query(
+        query_embeddings=[q_emb],
+        n_results=req.top_k,
+        include=["documents", "metadatas", "distances"]
+    )
+
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+
+    # Debug: log retrieved pages
+    retrieved_pages = [m["page"] for m in metas]
+    unique_pages = sorted(set(retrieved_pages))
+    print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
+
+    return StreamingResponse(
+        _stream_generator(req.question, req.top_k, req.provider, docs, metas),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
+
+
+def _stream_compare_generator(question: str, top_k: int, docs: List[str], metas: List[dict]):
+    """Generator function for streaming comparison responses via SSE."""
+    providers = ["openai", "together"]
+    provider_responses = {p: {"accumulated": "", "complete": False, "response": None} for p in providers}
+    
+    def stream_provider_sync(provider_name: str, event_queue: queue.Queue):
+        """Stream a single provider's response synchronously, putting events in queue."""
+        try:
+            context_blocks = []
+            for d, m in zip(docs, metas):
+                context_blocks.append(f"[{m['chunk_id']} | page {m['page']}]\n{d}")
+
+            system = (
+                "You are a senior investment analyst at a venture capital firm. "
+                "Answer questions using ONLY the provided report excerpts. "
+
+                "IMPORTANT: Your answer can paraphrase and synthesize information naturally. "
+                "The 'answer' field can paraphrase or synthesize for readability, but every factual claim must be grounded in citations. "
+                "Citations are required to show sources - the 'quote' field can be a brief summary or reference to the relevant content, not necessarily an exact quote. "
+
+                "Write in a crisp, investor-ready style with analytical depth. "
+                "Imagine the reader is an experienced investor who is familiar with the report and the industry. "
+                "The 'answer' should be structured to: lead with the main finding, provide reasoning and causal drivers, "
+                "include concrete specifics (numbers, trends, mechanisms), and synthesize across excerpts when relevant. "
+                "Aim for 3–6 sentences that balance conciseness with depth. "
+                "Avoid vague filler (e.g., 'significantly', 'rapidly') unless the context uses it. "
+
+                "The 'key_points' should complement the answer with discrete, actionable insights. "
+
+                "CRITICAL CITATION REQUIREMENTS: "
+                "You MUST provide citations ONLY in the 'citations' field — never inside the prose of the 'answer' or 'key_points'. "
+                "The 'answer' and 'key_points' must read cleanly with NO inline citations, page references, or chunk IDs. "
+
+                "Every factual claim, statistic, or specific detail in the answer MUST still be backed by a citation, "
+                "but those citations must appear exclusively in the 'citations' array. "
+
+                "If multiple facts are used, include multiple citation objects — one per fact — in the 'citations' array. "
+                "Do NOT include citations in parentheses or inline text. "
+
+                "The 'citations' field must still include: chunk_id, page, and a short quote or summary. "
+                "You MUST ground every factual claim in the provided context. "
+                "If synthesizing across multiple excerpts, do so explicitly (e.g., 'Across excerpts A and B...'). "
+                "If the report does NOT clearly contain the answer, set not_found=true and say you cannot find it in the report. "
+                "Do NOT infer, estimate, or use outside knowledge. "
+                "Return ONLY valid JSON matching the provided schema, and ALWAYS include all four top-level keys: "
+                "answer, key_points, citations, not_found. "
+            )
+
+            user = (
+                f"Question: {question}\n\n"
+                "Context:\n" + "\n\n".join(context_blocks) + "\n\n"
+                "Schema:\n"
+                "{"
+                "\"answer\": string, "
+                "\"key_points\": array of strings, "
+                "\"citations\": array of {\"chunk_id\": string, \"page\": number, \"quote\": string}, "
+                "\"not_found\": boolean"
+                "}\n\n"
+                "Constraints:\n"
+                "- quote can be a brief summary or reference (<= 25 words) - does NOT need to be exact quote\n"
+                "- chunk_id must match EXACTLY a chunk_id shown in the Context blocks above\n"
+                "- page number must match EXACTLY the page number shown for that chunk_id in Context\n"
+                "- citations must reference only chunk_ids and pages shown in Context\n"
+                "- CRITICAL: Every number, statistic, specific fact, or claim in your answer MUST have a citation\n"
+                "- If your answer mentions multiple facts from different chunks, include multiple citations (one per fact)\n"
+                "- If not_found=true, citations should be an empty array\n"
+                "- answer must be 3-6 sentences with structure: main finding → reasoning → specifics\n"
+                "- answer should synthesize key_points with analytical depth, not just list facts\n"
+            )
+
+            provider = get_provider(provider_name)
+            accumulated_text = ""
+            
+            for chunk in provider.generate_stream(system, user, temperature=0.0, max_tokens=2048):
+                accumulated_text += chunk
+                provider_responses[provider_name]["accumulated"] = accumulated_text
+                # Put chunk in queue with provider identifier
+                event_queue.put(f"data: {json.dumps({'type': 'chunk', 'provider': provider_name, 'content': chunk})}\n\n")
+
+            # Parse and validate
+            try:
+                data = json.loads(accumulated_text)
+                
+                # Validate citations
+                if "citations" in data and isinstance(data["citations"], list):
+                    chunk_lookup = {}
+                    for d, m in zip(docs, metas):
+                        chunk_lookup[m["chunk_id"]] = (m["page"], d)
+                    
+                    validated_citations = []
+                    for cit in data["citations"]:
+                        if isinstance(cit, dict) and cit.get("chunk_id") in chunk_lookup:
+                            expected_page, _ = chunk_lookup[cit.get("chunk_id")]
+                            if cit.get("page") == expected_page:
+                                validated_citations.append(cit)
+                    data["citations"] = validated_citations
+
+                # Ensure numeric citations
+                try:
+                    data = _ensure_numeric_citations(data, docs, metas)
+                except Exception:
+                    pass
+
+                data["provider"] = provider.get_provider_name()
+                response = AskResponse(**data)
+                provider_responses[provider_name]["response"] = response
+                provider_responses[provider_name]["complete"] = True
+                
+                # Put completion event in queue
+                event_queue.put(f"data: {json.dumps({'type': 'provider_complete', 'provider': provider_name, 'response': response.model_dump()})}\n\n")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to process {provider_name} response: {e}")
+                import traceback
+                traceback.print_exc()
+                error_response = AskResponse(
+                    answer=f"Error: {str(e)}",
+                    key_points=["Provider error"],
+                    citations=[],
+                    not_found=True,
+                    provider=provider_name,
+                )
+                provider_responses[provider_name]["response"] = error_response
+                provider_responses[provider_name]["complete"] = True
+                event_queue.put(f"data: {json.dumps({'type': 'provider_complete', 'provider': provider_name, 'response': error_response.model_dump()})}\n\n")
+        
+        except Exception as e:
+            print(f"[ERROR] Streaming error for {provider_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            error_response = AskResponse(
+                answer=f"Error: {str(e)}",
+                key_points=["Streaming error"],
+                citations=[],
+                not_found=True,
+                provider=provider_name,
+            )
+            provider_responses[provider_name]["response"] = error_response
+            provider_responses[provider_name]["complete"] = True
+            event_queue.put(f"data: {json.dumps({'type': 'provider_complete', 'provider': provider_name, 'response': error_response.model_dump()})}\n\n")
+
+    # Stream both providers in parallel using threads
+    q = queue.Queue()
+    stop_event = threading.Event()
+    
+    def run_stream(provider_name):
+        try:
+            stream_provider_sync(provider_name, q)
+        except Exception as e:
+            print(f"[ERROR] Stream error for {provider_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            error_response = AskResponse(
+                answer=f"Error: {str(e)}",
+                key_points=["Streaming error"],
+                citations=[],
+                not_found=True,
+                provider=provider_name,
+            )
+            q.put(f"data: {json.dumps({'type': 'provider_complete', 'provider': provider_name, 'response': error_response.model_dump()})}\n\n")
+    
+    # Start streaming both providers in separate threads
+    threads = []
+    for provider in providers:
+        t = threading.Thread(target=run_stream, args=(provider,), daemon=True)
+        t.start()
+        threads.append(t)
+    
+    # Yield events as they come in
+    completed = 0
+    try:
+        while completed < len(providers):
+            try:
+                event = q.get(timeout=2.0)
+                yield event
+                # Check if it's a completion event
+                if event.startswith("data: "):
+                    try:
+                        data = json.loads(event[6:])
+                        if data.get("type") == "provider_complete":
+                            completed += 1
+                    except Exception as e:
+                        print(f"[WARN] Failed to parse event: {e}")
+            except queue.Empty:
+                # Check if threads are still alive
+                if all(not t.is_alive() for t in threads):
+                    # All threads finished, break
+                    break
+                continue
+    finally:
+        stop_event.set()
+        # Wait for threads to finish
+        for t in threads:
+            t.join(timeout=1.0)
+    
+    # Send final comparison response
+    responses = [provider_responses[p]["response"] for p in providers if provider_responses[p]["response"]]
+    if responses:
+        yield f"data: {json.dumps({'type': 'complete', 'question': question, 'responses': [r.model_dump() for r in responses]})}\n\n"
+
+
+@app.post("/ask/compare/stream")
+@app.post("/api/ask/compare/stream")
+def ask_compare_stream(req: AskRequest):
+    """Stream comparison responses from multiple providers via SSE."""
+    try:
+        # 1) Embed query
+        q_emb = oai.embeddings.create(
+            model="text-embedding-3-small",
+            input=req.question
+        ).data[0].embedding
+
+        # 2) Retrieve chunks
+        results = col.query(
+            query_embeddings=[q_emb],
+            n_results=req.top_k,
+            include=["documents", "metadatas", "distances"]
+        )
+
+        docs = results["documents"][0]
+        metas = results["metadatas"][0]
+
+        # Debug: log retrieved pages
+        retrieved_pages = [m["page"] for m in metas]
+        unique_pages = sorted(set(retrieved_pages))
+        print(f"[DEBUG] Retrieved {len(docs)} chunks from pages: {unique_pages}")
+
+        return StreamingResponse(
+            _stream_compare_generator(req.question, req.top_k, docs, metas),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+    except Exception as e:
+        print(f"[ERROR] ask_compare_stream error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return error as SSE
+        def error_generator():
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        return StreamingResponse(
+            error_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+        )
 
 
 @app.post("/ask/compare", response_model=ComparisonResponse)
