@@ -24,8 +24,11 @@ A sophisticated Retrieval-Augmented Generation (RAG) application for querying Bl
 - **Toggle Control**: Enable/disable streaming with a checkbox
 
 ### User Experience
+- **Conversation Context**: Maintains conversation history for contextual follow-up questions
+- **Dynamic Suggested Questions**: AI-generated contextual follow-up questions that adapt to conversation
+- **Conversation History**: Full conversation tracking with expandable Q&A pairs
+- **Export & Share**: Copy conversation to clipboard or export as PDF
 - **Question History**: Session history with quick re-ask functionality
-- **Suggested Questions**: Pre-populated example questions
 - **Dark Theme**: Modern, investor-ready UI
 - **Responsive Design**: Works on desktop and mobile
 
@@ -126,6 +129,14 @@ Open your browser to: **http://localhost:3000**
 3. Type your question and click "Compare"
 4. View side-by-side responses from both providers
 
+### Conversation Features
+- **Follow-up Questions**: Ask contextual questions like "Tell me more about that" - the system remembers previous Q&A
+- **Dynamic Suggestions**: Suggested questions update automatically based on your conversation
+- **View Full History**: Expand any conversation turn to see the complete answer
+- **Copy Conversation**: Click "Copy" to copy the entire conversation to clipboard
+- **Export PDF**: Click "PDF" to download a formatted PDF of your conversation
+- **New Conversation**: Click "New Conversation" to start fresh
+
 ### Using Citations
 - Click any citation to open the PDF viewer at that page
 - Citations are automatically validated against the source document
@@ -143,10 +154,11 @@ Open your browser to: **http://localhost:3000**
 
 ### API Endpoints
 - `GET /health` - Health check and index statistics
-- `POST /ask` - Single provider query
-- `POST /ask/stream` - Streaming single provider query
-- `POST /ask/compare` - Comparison query (non-streaming)
-- `POST /ask/compare/stream` - Streaming comparison query
+- `POST /ask` - Single provider query (supports conversation history)
+- `POST /ask/stream` - Streaming single provider query (supports conversation history)
+- `POST /ask/compare` - Comparison query (non-streaming, supports conversation history)
+- `POST /ask/compare/stream` - Streaming comparison query (supports conversation history)
+- `POST /suggest-questions` - Generate contextual follow-up questions based on conversation history
 
 ## 📁 Project Structure
 
@@ -192,6 +204,13 @@ The system automatically:
 - **Unified Interface**: Same API for all providers
 - **Provider Caching**: Efficient provider instance management
 - **Error Handling**: Graceful fallbacks if a provider fails
+
+### Conversation Context
+- **History Tracking**: Automatically tracks all Q&A pairs in the session
+- **Context Window**: Includes last 3 Q&A pairs in prompts for follow-up questions
+- **Smart Suggestions**: AI generates contextual follow-up questions based on conversation
+- **Export Options**: Copy to clipboard or export as formatted PDF
+- **Expandable Display**: View full answers with expand/collapse functionality
 
 ## 🐛 Troubleshooting
 
