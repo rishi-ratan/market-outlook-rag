@@ -27,7 +27,9 @@ A sophisticated Retrieval-Augmented Generation (RAG) application for querying Bl
 - **Conversation Context**: Maintains conversation history for contextual follow-up questions
 - **Dynamic Suggested Questions**: AI-generated contextual follow-up questions that adapt to conversation
 - **Conversation History**: Full conversation tracking with expandable Q&A pairs
-- **Export & Share**: Copy conversation to clipboard or export as PDF
+- **Citation Preservation**: All citations are saved with conversation history for easy reference
+- **Enhanced PDF Navigation**: Click citations to jump to exact pages with automatic text search
+- **Export & Share**: Copy conversation to clipboard (with citations) or export as PDF (with sources)
 - **Question History**: Session history with quick re-ask functionality
 - **Dark Theme**: Modern, investor-ready UI
 - **Responsive Design**: Works on desktop and mobile
@@ -133,14 +135,19 @@ Open your browser to: **http://localhost:3000**
 - **Follow-up Questions**: Ask contextual questions like "Tell me more about that" - the system remembers previous Q&A
 - **Dynamic Suggestions**: Suggested questions update automatically based on your conversation
 - **View Full History**: Expand any conversation turn to see the complete answer
-- **Copy Conversation**: Click "Copy" to copy the entire conversation to clipboard
-- **Export PDF**: Click "PDF" to download a formatted PDF of your conversation
+- **Citation Buttons**: Each answer shows clickable citation buttons (e.g., "Pg 5", "Pg 12") in conversation history
+- **Copy Conversation**: Click "Copy" to copy the entire conversation to clipboard (includes all citations)
+- **Export PDF**: Click "PDF" to download a formatted PDF of your conversation (includes all sources)
 - **New Conversation**: Click "New Conversation" to start fresh
 
 ### Using Citations
-- Click any citation to open the PDF viewer at that page
-- Citations are automatically validated against the source document
-- Every factual claim is backed by at least one citation
+- **In Answers**: Click any citation to open the PDF viewer at that page
+- **In History**: Click citation buttons (e.g., "Pg 5") in conversation history to jump to sources
+- **Smart Search**: PDF viewer automatically attempts to search for the quoted text
+- **Manual Search**: Use "Search in PDF" button or Ctrl+F (Cmd+F on Mac) to find exact text
+- **Citation Validation**: Citations are automatically validated against the source document
+- **Source Preservation**: All citations are saved with conversation history for future reference
+- **Every factual claim is backed by at least one citation**
 
 ## 🔧 Configuration
 
@@ -207,10 +214,19 @@ The system automatically:
 
 ### Conversation Context
 - **History Tracking**: Automatically tracks all Q&A pairs in the session
+- **Citation Preservation**: All citations (page numbers and quotes) are saved with each Q&A pair
 - **Context Window**: Includes last 3 Q&A pairs in prompts for follow-up questions
 - **Smart Suggestions**: AI generates contextual follow-up questions based on conversation
-- **Export Options**: Copy to clipboard or export as formatted PDF
+- **Export Options**: Copy to clipboard (with citations) or export as formatted PDF (with sources)
 - **Expandable Display**: View full answers with expand/collapse functionality
+- **Quick Navigation**: Click citation buttons in history to jump directly to PDF pages
+
+### Enhanced PDF Navigation
+- **Automatic Text Search**: When opening a citation, the system extracts searchable text from the quote
+- **PDF.js Integration**: Attempts to use PDF.js search functionality when available
+- **Browser Find Fallback**: Falls back to native browser find (Ctrl+F / Cmd+F) if PDF.js isn't available
+- **Search Tips**: Shows the search text and keyboard shortcuts in the PDF viewer
+- **Exact Text Location**: Helps users find the exact sentence or paragraph referenced in citations
 
 ## 🐛 Troubleshooting
 

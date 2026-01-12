@@ -51,7 +51,7 @@ export default function Page() {
   const [data, setData] = useState<AskResponse | null>(null);
   const [comparisonData, setComparisonData] = useState<ComparisonResponse | null>(null);
   const [history, setHistory] = useState<string[]>([]);
-  const [conversationHistory, setConversationHistory] = useState<Array<{question: string; answer: string}>>([]);
+  const [conversationHistory, setConversationHistory] = useState<Array<{question: string; answer: string; citations: Citation[]}>>([]);
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>(SUGGESTED_QUESTIONS);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
@@ -73,10 +73,41 @@ export default function Page() {
   const [pdfPage, setPdfPage] = useState<number>(1);
   const [pdfQuote, setPdfQuote] = useState<string>("");
 
-  function openPdfAt(page: number, quote: string) {
+  const [pdfSearchText, setPdfSearchText] = useState<string>("");
+  const pdfIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  function openPdfAt(page: number, quote: string, searchText?: string) {
     setPdfPage(page || 1);
     setPdfQuote(quote || "");
+    // Extract searchable text from quote (first 50 chars, remove quotes and special chars)
+    const searchableText = searchText || quote.replace(/["'`]/g, '').substring(0, 50).trim();
+    setPdfSearchText(searchableText);
     setPdfOpen(true);
+    
+    // Try to search in PDF after a short delay (for PDF.js viewers)
+    setTimeout(() => {
+      try {
+        const iframe = pdfIframeRef.current;
+        if (iframe && iframe.contentWindow) {
+          // Try to trigger PDF.js search if available
+          const pdfWindow = iframe.contentWindow as any;
+          if (pdfWindow.PDFViewerApplication) {
+            // PDF.js viewer is available
+            pdfWindow.PDFViewerApplication.findController.executeCommand('find', {
+              query: searchableText,
+              highlightAll: true,
+              caseSensitive: false,
+              entireWord: false,
+            });
+          } else if (pdfWindow.find) {
+            // Native browser find
+            pdfWindow.find(searchableText);
+          }
+        }
+      } catch (e) {
+        console.log('PDF search not available:', e);
+      }
+    }, 500);
   }
 
   function onQuestionKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -139,9 +170,9 @@ export default function Page() {
     });
   }
 
-  function addToConversationHistory(question: string, answer: string) {
+  function addToConversationHistory(question: string, answer: string, citations: Citation[] = []) {
     setConversationHistory((prev) => {
-      const newHistory = [...prev, { question, answer }];
+      const newHistory = [...prev, { question, answer, citations }];
       // Keep only last 10 turns (5 Q&A pairs) to avoid token limits
       const updated = newHistory.slice(-10);
       // Update suggested questions after adding to history
@@ -214,7 +245,16 @@ export default function Page() {
 
   function copyConversation() {
     const conversationText = conversationHistory
-      .map((turn, idx) => `Turn ${idx + 1}:\nQ: ${turn.question}\nA: ${turn.answer}\n`)
+      .map((turn, idx) => {
+        let text = `Turn ${idx + 1}:\nQ: ${turn.question}\nA: ${turn.answer}\n`;
+        if (turn.citations && turn.citations.length > 0) {
+          text += `\nSources (${turn.citations.length}):\n`;
+          turn.citations.forEach((cit, citIdx) => {
+            text += `  ${citIdx + 1}. Page ${cit.page}: "${cit.quote}"\n`;
+          });
+        }
+        return text;
+      })
       .join('\n---\n\n');
     
     navigator.clipboard.writeText(conversationText).then(() => {
@@ -276,7 +316,31 @@ export default function Page() {
         doc.setFont('helvetica', 'normal');
         const answerLines = doc.splitTextToSize(`A: ${turn.answer}`, maxWidth);
         doc.text(answerLines, margin, yPos);
-        yPos += answerLines.length * lineHeight + 8;
+        yPos += answerLines.length * lineHeight + 3;
+
+        // Citations if available
+        if (turn.citations && turn.citations.length > 0) {
+          if (yPos > pageHeight - 30) {
+            doc.addPage();
+            yPos = 20;
+          }
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          doc.text(`Sources (${turn.citations.length}):`, margin, yPos);
+          yPos += lineHeight;
+          doc.setFont('helvetica', 'normal');
+          turn.citations.forEach((cit, citIdx) => {
+            if (yPos > pageHeight - 20) {
+              doc.addPage();
+              yPos = 20;
+            }
+            const citText = `  ${citIdx + 1}. Page ${cit.page}: "${cit.quote.substring(0, 60)}${cit.quote.length > 60 ? '...' : ''}"`;
+            const citLines = doc.splitTextToSize(citText, maxWidth - 10);
+            doc.text(citLines, margin + 5, yPos);
+            yPos += citLines.length * lineHeight;
+          });
+          yPos += 5;
+        }
 
         // Separator (if not last)
         if (idx < conversationHistory.length - 1) {
@@ -416,7 +480,7 @@ export default function Page() {
                   setData(response);
                   setStreamingAnswer("");
                   setStreamingProvider(response.provider || null);
-                  addToConversationHistory(q, response.answer);
+                  addToConversationHistory(q, response.answer, response.citations || []);
                 } else if (data.type === "error") {
                   console.error("Streaming error:", data.message);
                   throw new Error(data.message || "Streaming error");
@@ -519,7 +583,7 @@ export default function Page() {
                   });
                   // For comparison, use the first response's answer for conversation history
                   if (responses && responses.length > 0) {
-                    addToConversationHistory(q, responses[0].answer);
+                    addToConversationHistory(q, responses[0].answer, responses[0].citations || []);
                   }
                 } else if (data.type === "error") {
                   throw new Error(data.message || "Streaming error");
@@ -575,12 +639,12 @@ export default function Page() {
         setComparisonData(json);
         // For comparison, use the first response's answer for conversation history
         if (json.responses && json.responses.length > 0) {
-          addToConversationHistory(q, json.responses[0].answer);
+          addToConversationHistory(q, json.responses[0].answer, json.responses[0].citations || []);
         }
       } else {
         const json = (await res.json()) as AskResponse;
         setData(json);
-        addToConversationHistory(q, json.answer);
+        addToConversationHistory(q, json.answer, json.citations || []);
       }
     } catch (err: any) {
       setError(err?.message ?? "Something went wrong.");
@@ -700,6 +764,23 @@ export default function Page() {
                                 <span>{answerPreview}</span>
                               )}
                             </div>
+                            {turn.citations && turn.citations.length > 0 && (
+                              <div className="mt-2">
+                                <div className="text-xs text-zinc-500 mb-1">Sources ({turn.citations.length}):</div>
+                                <div className="flex flex-wrap gap-1">
+                                  {turn.citations.map((citation, citIdx) => (
+                                    <button
+                                      key={citIdx}
+                                      onClick={() => openPdfAt(citation.page, citation.quote, citation.quote)}
+                                      className="text-xs px-2 py-1 rounded border border-zinc-700 bg-zinc-900/40 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                                      title={`Page ${citation.page}: ${citation.quote}`}
+                                    >
+                                      Pg {citation.page}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                         {showExpandButton && (
@@ -921,7 +1002,7 @@ export default function Page() {
                               <button
                                 key={`${c.chunk_id}-${i}`}
                                 type="button"
-                                onClick={() => openPdfAt(c.page, c.quote)}
+                                onClick={() => openPdfAt(c.page, c.quote, c.quote)}
                                 className="w-full text-left rounded-lg border border-zinc-800 bg-zinc-900/40 p-2 hover:bg-zinc-900/60 text-xs"
                               >
                                 <div className="text-zinc-300">Page {c.page}</div>
@@ -1118,14 +1199,43 @@ export default function Page() {
 
               <div className="flex-1 bg-zinc-900/10">
                 <iframe
+                  ref={pdfIframeRef}
                   title="PDF Viewer"
-                  src={`${PDF_PUBLIC_PATH}#page=${pdfPage}`}
+                  src={`${PDF_PUBLIC_PATH}#page=${pdfPage}${pdfSearchText ? `&search=${encodeURIComponent(pdfSearchText)}` : ''}`}
                   className="h-full w-full"
                 />
               </div>
             </div>
-            <div className="mx-auto mt-3 max-w-6xl text-xs text-zinc-500">
-              Tip: The built-in PDF viewer jumps to the cited page. Highlighting exact quoted text inside the PDF requires a PDF.js-based renderer.
+            <div className="mx-auto mt-3 max-w-6xl">
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-900/40 px-4 py-2">
+                <div className="text-xs text-zinc-400">
+                  <span className="text-zinc-300">Tip:</span> {pdfSearchText ? (
+                    <>Use Ctrl+F (Cmd+F on Mac) to search for: <span className="font-mono text-zinc-200">"{pdfSearchText.substring(0, 40)}{pdfSearchText.length > 40 ? '...' : ''}"</span></>
+                  ) : (
+                    <>The PDF viewer jumps to the cited page. Use Ctrl+F to search for specific text.</>
+                  )}
+                </div>
+                {pdfSearchText && (
+                  <button
+                    onClick={() => {
+                      try {
+                        const iframe = pdfIframeRef.current;
+                        if (iframe && iframe.contentWindow) {
+                          const pdfWindow = iframe.contentWindow as any;
+                          if (pdfWindow.find) {
+                            pdfWindow.find(pdfSearchText);
+                          }
+                        }
+                      } catch (e) {
+                        console.log('Search failed:', e);
+                      }
+                    }}
+                    className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors px-2 py-1 rounded border border-zinc-700 hover:border-zinc-600"
+                  >
+                    Search in PDF
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
