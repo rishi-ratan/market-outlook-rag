@@ -1,8 +1,14 @@
 #!/bin/bash
 # Don't use set -e - we want to handle errors gracefully and show logs
 
+# Force output to be unbuffered so logs appear immediately
+export PYTHONUNBUFFERED=1
+
 echo "=========================================="
 echo "Starting Market Outlook RAG API..."
+echo "Script location: $0"
+echo "Current directory: $(pwd)"
+echo "User: $(whoami)"
 echo "=========================================="
 
 # Check if ChromaDB index exists
@@ -79,5 +85,7 @@ echo "=========================================="
 # Use PORT environment variable if set (Railway/Render), otherwise default to 8000
 # Railway automatically sets PORT (usually 8080), so we use it directly
 # Use exec to replace shell process with uvicorn
-exec python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info 2>&1
+echo "About to start uvicorn..."
+echo "Command: python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info"
+python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info
 
