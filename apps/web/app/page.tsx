@@ -288,14 +288,51 @@ export default function Page() {
           setUploadProgress("");
         }, 300000);
       } else {
-        const error = await res.json();
-        alert(`Upload failed: ${error.detail || "Unknown error"}`);
+        let errorMessage = "Unknown error";
+        try {
+          const error = await res.json();
+          errorMessage = error.detail || error.message || `HTTP ${res.status}`;
+        } catch {
+          errorMessage = `HTTP ${res.status}: ${res.statusText}`;
+        }
+        
+        // Check if it's a connection error (likely missing API_BASE)
+        if (API_BASE.includes("127.0.0.1") || API_BASE.includes("localhost")) {
+          alert(
+            `Failed to upload: Backend not configured.\n\n` +
+            `Please set NEXT_PUBLIC_API_BASE in Vercel:\n` +
+            `Settings → Environment Variables → Add NEXT_PUBLIC_API_BASE\n` +
+            `Value: Your Railway backend URL\n\n` +
+            `Current API_BASE: ${API_BASE}`
+          );
+        } else {
+          alert(`Upload failed: ${errorMessage}\n\nBackend URL: ${API_BASE}`);
+        }
         setUploading(false);
         setUploadProgress("");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Upload error:", err);
-      alert("Failed to upload document");
+      let errorMsg = "Failed to upload document";
+      
+      // Check if it's a network/CORS error
+      if (err.message?.includes("Failed to fetch") || err.message?.includes("NetworkError")) {
+        if (API_BASE.includes("127.0.0.1") || API_BASE.includes("localhost")) {
+          errorMsg = `Cannot connect to backend.\n\n` +
+            `NEXT_PUBLIC_API_BASE is not set in Vercel.\n` +
+            `Go to Vercel → Settings → Environment Variables\n` +
+            `Add: NEXT_PUBLIC_API_BASE = Your Railway URL\n\n` +
+            `Current: ${API_BASE}`;
+        } else {
+          errorMsg = `Cannot connect to backend at ${API_BASE}.\n\n` +
+            `Check:\n` +
+            `1. Railway backend is running\n` +
+            `2. CORS is configured (ALLOWED_ORIGINS includes your Vercel URL)\n` +
+            `3. Backend URL is correct`;
+        }
+      }
+      
+      alert(errorMsg);
       setUploading(false);
       setUploadProgress("");
     }
