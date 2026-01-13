@@ -235,7 +235,13 @@ export default function Page() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch(`${API_BASE}/documents/upload`, {
+      // Ensure API_BASE has https:// prefix
+      const apiUrl = API_BASE.startsWith('http') ? API_BASE : `https://${API_BASE}`;
+      const uploadUrl = `${apiUrl}/documents/upload`;
+      
+      console.log("Uploading to:", uploadUrl);
+      
+      const res = await fetch(uploadUrl, {
         method: "POST",
         body: formData,
       });
@@ -316,19 +322,21 @@ export default function Page() {
       let errorMsg = "Failed to upload document";
       
       // Check if it's a network/CORS error
+      const apiUrl = API_BASE.startsWith('http') ? API_BASE : `https://${API_BASE}`;
       if (err.message?.includes("Failed to fetch") || err.message?.includes("NetworkError")) {
         if (API_BASE.includes("127.0.0.1") || API_BASE.includes("localhost")) {
           errorMsg = `Cannot connect to backend.\n\n` +
             `NEXT_PUBLIC_API_BASE is not set in Vercel.\n` +
             `Go to Vercel → Settings → Environment Variables\n` +
-            `Add: NEXT_PUBLIC_API_BASE = Your Railway URL\n\n` +
+            `Add: NEXT_PUBLIC_API_BASE = Your Railway URL (with https://)\n\n` +
             `Current: ${API_BASE}`;
         } else {
-          errorMsg = `Cannot connect to backend at ${API_BASE}.\n\n` +
+          errorMsg = `Cannot connect to backend at ${apiUrl}.\n\n` +
             `Check:\n` +
             `1. Railway backend is running\n` +
             `2. CORS is configured (ALLOWED_ORIGINS includes your Vercel URL)\n` +
-            `3. Backend URL is correct`;
+            `3. Backend URL is correct and includes https://\n` +
+            `4. Test: ${apiUrl}/health`;
         }
       }
       
