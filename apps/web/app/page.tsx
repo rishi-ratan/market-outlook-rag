@@ -900,11 +900,6 @@ export default function Page() {
       let errorMsg = err?.message ?? "Something went wrong.";
       if (errorMsg.includes("404") || errorMsg.includes("No active document")) {
         errorMsg = "No active document available. Please upload a document first.";
-      } else if (res && !res.ok) {
-        const errorText = await res.text().catch(() => "");
-        if (errorText.includes("No active document")) {
-          errorMsg = "No active document available. Please upload a document first.";
-        }
       }
       setError(errorMsg);
     } finally {
@@ -922,7 +917,7 @@ export default function Page() {
             <div className="absolute top-0 right-0 flex items-center gap-3">
               {conversationHistory.length > 0 && (
                 <button
-                  onClick={clearConversation}
+                  onClick={() => clearConversation()}
                   className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900/80 hover:text-zinc-100 transition-colors"
                   title="Start a new conversation"
                 >
@@ -1115,7 +1110,7 @@ export default function Page() {
                       PDF
                     </button>
                     <button
-                      onClick={clearConversation}
+                      onClick={() => clearConversation()}
                       className="text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
                       title="Clear conversation"
                     >
