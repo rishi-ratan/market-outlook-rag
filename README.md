@@ -23,9 +23,18 @@ A sophisticated Retrieval-Augmented Generation (RAG) application for querying Bl
 - **Visual Indicators**: Green borders, pulsing dots, and progress indicators
 - **Toggle Control**: Enable/disable streaming with a checkbox
 
+### Document Management
+- **Upload PDFs**: Upload and manage multiple PDF documents
+- **Per-Document Collections**: Each document has its own ChromaDB collection for isolated RAG
+- **Active Document System**: Switch between documents seamlessly
+- **Document Metadata**: Track document status, pages, chunks, and upload dates
+- **Automatic Processing**: Documents are processed asynchronously upon upload
+- **Document Deletion**: Remove documents and their associated data
+- **PDF Viewer Integration**: PDF viewer automatically displays the active document
+
 ### User Experience
 - **Conversation Context**: Maintains conversation history for contextual follow-up questions
-- **Dynamic Suggested Questions**: AI-generated contextual follow-up questions that adapt to conversation
+- **Dynamic Suggested Questions**: AI-generated contextual follow-up questions that adapt to conversation and document content
 - **Conversation History**: Full conversation tracking with expandable Q&A pairs
 - **Citation Preservation**: All citations are saved with conversation history for easy reference
 - **Enhanced PDF Navigation**: Click citations to jump to exact pages with automatic text search
@@ -86,13 +95,15 @@ cd apps/web
 npm install
 ```
 
-### 4. Build the Index (First Time)
+### 4. Build the Index (Optional - for default document)
 ```bash
 cd ingestion
 python build_index.py
 ```
 
 This processes `data/report.pdf` and creates the vector index in `storage/chroma/`.
+
+**Note**: You can also upload documents directly through the UI. The default document setup is optional.
 
 ## 🚀 Running the Application
 

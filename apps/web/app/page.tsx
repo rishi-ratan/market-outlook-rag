@@ -29,7 +29,6 @@ export default function Page() {
   );
 
   const TOP_K = 8; // number of passages retrieved from the report
-  const PDF_PUBLIC_PATH = "/report.pdf";
 
   const SUGGESTED_QUESTIONS: string[] = [
     "What does the report say about the secondaries market and liquidity?",
@@ -75,6 +74,22 @@ export default function Page() {
 
   const [pdfSearchText, setPdfSearchText] = useState<string>("");
   const pdfIframeRef = useRef<HTMLIFrameElement | null>(null);
+  
+  // Document management state
+  const [documents, setDocuments] = useState<Array<{
+    id: string;
+    filename: string;
+    uploaded_at: string;
+    file_size: number;
+    status: "processing" | "processed" | "error";
+    chunks?: number;
+    pages?: number;
+    error?: string;
+  }>>([]);
+  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string>("");
+  const [showDocumentsPanel, setShowDocumentsPanel] = useState(false);
 
   function openPdfAt(page: number, quote: string, searchText?: string) {
     setPdfPage(page || 1);
@@ -143,7 +158,152 @@ export default function Page() {
         // ignore warmup errors
       })
       .finally(() => setWarming(false));
+    
+    // Load documents on mount
+    fetchDocuments();
   }, [API_BASE]);
+
+  async function fetchDocuments() {
+    try {
+      const res = await fetch(`${API_BASE}/documents`);
+      if (res.ok) {
+        const data = await res.json();
+        const previousActiveId = activeDocumentId;
+        setDocuments(data.documents || []);
+        setActiveDocumentId(data.active_document_id || null);
+        
+        // If active document changed or is newly set, refresh suggested questions
+        if (data.active_document_id && data.active_document_id !== previousActiveId) {
+          // Check if the document is processed
+          const activeDoc = data.documents.find((d: any) => d.id === data.active_document_id);
+          if (activeDoc && activeDoc.status === "processed") {
+            // Refresh questions based on the new document
+            await updateSuggestedQuestions();
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch documents:", err);
+    }
+  }
+
+  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+      alert("Please select a PDF file");
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress("Uploading...");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(`${API_BASE}/documents/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setUploadProgress("Processing document...");
+        // Refresh documents list
+        await fetchDocuments();
+        // Poll for status update
+        const pollInterval = setInterval(async () => {
+          await fetchDocuments();
+          const updatedDocs = await fetch(`${API_BASE}/documents`).then(r => r.json());
+          const doc = updatedDocs.documents.find((d: any) => d.id === data.id);
+          if (doc && doc.status !== "processing") {
+            clearInterval(pollInterval);
+            setUploading(false);
+            setUploadProgress("");
+            if (doc.status === "error") {
+              alert(`Error processing document: ${doc.error || "Unknown error"}`);
+            } else if (doc.status === "processed") {
+              // If this document became active and is now processed, refresh questions
+              if (updatedDocs.active_document_id === doc.id) {
+                await updateSuggestedQuestions();
+              }
+            }
+          }
+        }, 2000);
+        // Stop polling after 5 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          setUploading(false);
+          setUploadProgress("");
+        }, 300000);
+      } else {
+        const error = await res.json();
+        alert(`Upload failed: ${error.detail || "Unknown error"}`);
+        setUploading(false);
+        setUploadProgress("");
+      }
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert("Failed to upload document");
+      setUploading(false);
+      setUploadProgress("");
+    }
+    
+    // Reset file input
+    event.target.value = "";
+  }
+
+  async function activateDocument(docId: string) {
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/activate`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        await fetchDocuments();
+        // Clear conversation when switching documents
+        clearConversation();
+        // Refresh suggested questions based on the new active document
+        await updateSuggestedQuestions();
+      } else {
+        const error = await res.json();
+        alert(`Failed to activate document: ${error.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error("Activate error:", err);
+      alert("Failed to activate document");
+    }
+  }
+
+  async function deleteDocument(docId: string) {
+    if (!confirm("Are you sure you want to delete this document? This action cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        await fetchDocuments();
+        // If the active document was deleted, clear conversation
+        if (activeDocumentId === docId) {
+          clearConversation();
+        }
+      } else {
+        const error = await res.json();
+        alert(`Failed to delete document: ${error.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      console.error("Delete error:", err);
+      alert("Failed to delete document");
+    }
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
 
   // Update suggested questions when conversation history changes
   useEffect(() => {
@@ -176,30 +336,28 @@ export default function Page() {
       // Keep only last 10 turns (5 Q&A pairs) to avoid token limits
       const updated = newHistory.slice(-10);
       // Update suggested questions after adding to history
-      setTimeout(() => updateSuggestedQuestions(question, answer), 100);
+      // Use the updated history that will be set - pass the full updated history
+      setTimeout(() => {
+        // Use the updated history directly
+        updateSuggestedQuestionsWithHistory(updated, question, answer);
+      }, 300);
       return updated;
     });
   }
 
-  async function updateSuggestedQuestions(lastQuestion?: string, lastAnswer?: string) {
-    // If no history, use default questions
-    if (conversationHistory.length === 0 && !lastQuestion) {
-      setSuggestedQuestions(SUGGESTED_QUESTIONS);
-      return;
-    }
-
+  async function updateSuggestedQuestionsWithHistory(history: Array<{question: string; answer: string; citations: Citation[]}>, lastQuestion?: string, lastAnswer?: string) {
     setLoadingSuggestions(true);
     try {
-      const historyToSend = lastQuestion && lastAnswer 
-        ? [...conversationHistory, { question: lastQuestion, answer: lastAnswer }]
-        : conversationHistory;
+      // Use the provided history - it already includes the latest Q&A if it was just added
+      // Only append if we're calling this from elsewhere with new question/answer not yet in history
+      const historyToSend = history;
 
       const res = await fetch(`${API_BASE}/suggest-questions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_history: historyToSend.map(t => ({ question: t.question, answer: t.answer })),
-          last_answer: lastAnswer || (conversationHistory.length > 0 ? conversationHistory[conversationHistory.length - 1].answer : null),
+          last_answer: lastAnswer || (historyToSend.length > 0 ? historyToSend[historyToSend.length - 1].answer : null) || null,
         }),
       });
 
@@ -208,13 +366,26 @@ export default function Page() {
         if (data.questions && Array.isArray(data.questions)) {
           setSuggestedQuestions(data.questions);
         }
+      } else {
+        // If request fails, keep current suggestions or use defaults
+        console.warn("Failed to fetch suggested questions, using defaults");
       }
     } catch (err) {
-      console.error("Failed to fetch suggested questions:", err);
-      // Keep current suggestions on error
+      // Silently handle fetch errors (network issues, backend down, etc.)
+      // Keep current suggestions - don't break the UI
+      console.warn("Failed to fetch suggested questions:", err);
+      // Only fall back to defaults if we have no suggestions at all
+      if (suggestedQuestions.length === 0) {
+        setSuggestedQuestions(SUGGESTED_QUESTIONS);
+      }
     } finally {
       setLoadingSuggestions(false);
     }
+  }
+
+  async function updateSuggestedQuestions(lastQuestion?: string, lastAnswer?: string) {
+    // Wrapper that uses current conversation history from state
+    await updateSuggestedQuestionsWithHistory(conversationHistory, lastQuestion, lastAnswer);
   }
 
   function clearConversation() {
@@ -497,7 +668,11 @@ export default function Page() {
         console.log("Streaming finished, total accumulated:", accumulatedText.length, "chars");
       } catch (err: any) {
         console.error("Streaming error:", err);
-        setError(err?.message ?? "Something went wrong.");
+        let errorMsg = err?.message ?? "Something went wrong.";
+        if (errorMsg.includes("404") || errorMsg.includes("No active document")) {
+          errorMsg = "No active document available. Please upload a document first.";
+        }
+        setError(errorMsg);
       } finally {
         setLoading(false);
       }
@@ -596,7 +771,11 @@ export default function Page() {
         }
       } catch (err: any) {
         console.error("Streaming comparison error:", err);
-        setError(err?.message ?? "Network error. Check console for details.");
+        let errorMsg = err?.message ?? "Network error. Check console for details.";
+        if (errorMsg.includes("404") || errorMsg.includes("No active document")) {
+          errorMsg = "No active document available. Please upload a document first.";
+        }
+        setError(errorMsg);
         // Try to show partial results if any
         const partialResponses = [
           streamingComparison.openai.response,
@@ -647,7 +826,17 @@ export default function Page() {
         addToConversationHistory(q, json.answer, json.citations || []);
       }
     } catch (err: any) {
-      setError(err?.message ?? "Something went wrong.");
+      console.error("Ask error:", err);
+      let errorMsg = err?.message ?? "Something went wrong.";
+      if (errorMsg.includes("404") || errorMsg.includes("No active document")) {
+        errorMsg = "No active document available. Please upload a document first.";
+      } else if (res && !res.ok) {
+        const errorText = await res.text().catch(() => "");
+        if (errorText.includes("No active document")) {
+          errorMsg = "No active document available. Please upload a document first.";
+        }
+      }
+      setError(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -673,6 +862,16 @@ export default function Page() {
                   New Conversation
                 </button>
               )}
+              <button
+                onClick={() => setShowDocumentsPanel(!showDocumentsPanel)}
+                className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900/80 hover:text-zinc-100 transition-colors"
+                title="Manage documents"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                </svg>
+                <span className="hidden sm:inline">Documents</span>
+              </button>
               <Link
                 href="/about"
                 className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-900/80 hover:text-zinc-100 transition-colors"
@@ -696,15 +895,126 @@ export default function Page() {
               </Link>
             </div>
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-1 text-xs text-zinc-300">
-              RAG Prototype • Single PDF • Grounded Q&A
+              RAG Prototype • Multi-Document • Grounded Q&A
             </div>
             <h1 className="mt-5 text-5xl font-semibold tracking-tight">
               Market Outlook Analyst
             </h1>
             <p className="mt-3 text-lg text-zinc-300">
-              Ask questions about BlackRock&apos;s 2026 Private Markets Outlook
+              {activeDocumentId 
+                ? `Active: ${documents.find(d => d.id === activeDocumentId)?.filename || "Unknown"}`
+                : "Upload a document to get started"}
             </p>
           </header>
+          
+          {/* Documents Management Panel */}
+          {showDocumentsPanel && (
+            <section className="mb-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-zinc-200">Document Management</h2>
+                <button
+                  onClick={() => setShowDocumentsPanel(false)}
+                  className="text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              
+              {/* Upload Section */}
+              <div className="mb-6">
+                <label className="block mb-2 text-sm font-medium text-zinc-300">Upload PDF Document</label>
+                <div className="flex items-center gap-4">
+                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-950/40 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-900/60 transition-colors">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    Choose File
+                    <input
+                      type="file"
+                      accept=".pdf"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      disabled={uploading}
+                    />
+                  </label>
+                  {uploading && (
+                    <div className="text-sm text-zinc-400">
+                      {uploadProgress}
+                      <span className="inline-block ml-2 w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Documents List */}
+              <div className="space-y-2">
+                {documents.length === 0 ? (
+                  <p className="text-sm text-zinc-500">No documents uploaded yet. Upload a PDF to get started.</p>
+                ) : (
+                  documents.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className={`flex items-center justify-between p-4 rounded-lg border ${
+                        doc.id === activeDocumentId
+                          ? "border-green-500 bg-zinc-900/60"
+                          : "border-zinc-800 bg-zinc-950/40"
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-medium text-zinc-200 truncate">{doc.filename}</span>
+                          {doc.id === activeDocumentId && (
+                            <span className="px-2 py-0.5 text-xs font-medium text-green-400 bg-green-400/10 rounded">
+                              Active
+                            </span>
+                          )}
+                          {doc.status === "processing" && (
+                            <span className="px-2 py-0.5 text-xs font-medium text-yellow-400 bg-yellow-400/10 rounded flex items-center gap-1">
+                              <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></span>
+                              Processing
+                            </span>
+                          )}
+                          {doc.status === "error" && (
+                            <span className="px-2 py-0.5 text-xs font-medium text-red-400 bg-red-400/10 rounded">
+                              Error
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-400 space-x-4">
+                          <span>{formatFileSize(doc.file_size)}</span>
+                          {doc.pages && <span>{doc.pages} pages</span>}
+                          {doc.chunks && <span>{doc.chunks} chunks</span>}
+                          <span>{new Date(doc.uploaded_at).toLocaleDateString()}</span>
+                        </div>
+                        {doc.error && (
+                          <div className="mt-2 text-xs text-red-400">{doc.error}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 ml-4">
+                        {doc.status === "processed" && doc.id !== activeDocumentId && (
+                          <button
+                            onClick={() => activateDocument(doc.id)}
+                            className="px-3 py-1.5 text-xs font-medium text-zinc-200 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors"
+                          >
+                            Activate
+                          </button>
+                        )}
+                        <button
+                          onClick={() => deleteDocument(doc.id)}
+                          className="px-3 py-1.5 text-xs font-medium text-red-400 bg-red-400/10 hover:bg-red-400/20 rounded transition-colors"
+                          disabled={doc.status === "processing"}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          )}
           <div>
             {/* Conversation History */}
             {conversationHistory.length > 0 && (
@@ -1201,7 +1511,7 @@ export default function Page() {
                 <iframe
                   ref={pdfIframeRef}
                   title="PDF Viewer"
-                  src={`${PDF_PUBLIC_PATH}#page=${pdfPage}${pdfSearchText ? `&search=${encodeURIComponent(pdfSearchText)}` : ''}`}
+                  src={`${API_BASE}/documents/active/pdf#page=${pdfPage}${pdfSearchText ? `&search=${encodeURIComponent(pdfSearchText)}` : ''}`}
                   className="h-full w-full"
                 />
               </div>

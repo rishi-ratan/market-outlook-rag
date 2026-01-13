@@ -3,14 +3,17 @@ import json
 import re
 import queue
 import threading
+import uuid
+import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, FileResponse
 from pydantic import BaseModel, Field, ValidationError
 import asyncio
 
@@ -34,8 +37,95 @@ if not OPENAI_API_KEY:
 oai = OpenAI(api_key=OPENAI_API_KEY)
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", str(ROOT / "storage" / "chroma"))
+UPLOAD_DIR = ROOT / "storage" / "uploads"
+DOCUMENTS_META_FILE = ROOT / "storage" / "documents_metadata.json"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 ch = chromadb.PersistentClient(path=CHROMA_DIR)
-col = ch.get_or_create_collection(name="market_outlook")
+
+# Document metadata storage
+def load_documents_metadata() -> Dict:
+    """Load document metadata from JSON file."""
+    if DOCUMENTS_META_FILE.exists():
+        try:
+            with open(DOCUMENTS_META_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {"documents": [], "active_document_id": None}
+    return {"documents": [], "active_document_id": None}
+
+def save_documents_metadata(metadata: Dict):
+    """Save document metadata to JSON file."""
+    DOCUMENTS_META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(DOCUMENTS_META_FILE, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+def get_active_collection():
+    """Get the ChromaDB collection for the active document."""
+    meta = load_documents_metadata()
+    active_id = meta.get("active_document_id")
+    
+    if active_id:
+        # Check if document exists
+        doc = next((d for d in meta.get("documents", []) if d["id"] == active_id), None)
+        if doc and doc.get("status") == "processed":
+            collection_name = f"doc_{active_id}"
+            try:
+                return ch.get_collection(name=collection_name)
+            except:
+                pass
+    
+    # Fallback to default collection - check if it exists and has content
+    try:
+        default_col = ch.get_collection(name="market_outlook")
+        if default_col.count() > 0:
+            return default_col
+    except:
+        pass
+    
+    # If no collection exists, raise an error
+    raise HTTPException(status_code=404, detail="No active document available. Please upload a document first.")
+
+# Initialize default collection if available, otherwise will be set on first use
+try:
+    col = get_active_collection()
+except:
+    col = None
+
+# Initialize default document if collection exists but not in metadata
+def initialize_default_document():
+    """Check if default collection exists and create metadata entry if needed."""
+    try:
+        default_col = ch.get_collection(name="market_outlook")
+        count = default_col.count()
+        if count > 0:
+            meta = load_documents_metadata()
+            # Check if default document entry exists
+            default_doc = next((d for d in meta.get("documents", []) if d.get("id") == "default"), None)
+            if not default_doc:
+                # Create default document entry
+                default_doc = {
+                    "id": "default",
+                    "filename": "report.pdf",  # or detect from data folder
+                    "uploaded_at": datetime.now().isoformat(),
+                    "file_size": 0,  # Unknown for legacy document
+                    "status": "processed",
+                    "chunks": count,
+                    "pages": 0  # Unknown for legacy document
+                }
+                if not meta.get("documents"):
+                    meta["documents"] = []
+                meta["documents"].append(default_doc)
+                # Set as active if no active document
+                if not meta.get("active_document_id"):
+                    meta["active_document_id"] = "default"
+                save_documents_metadata(meta)
+                print(f"[INFO] Initialized default document with {count} chunks")
+    except:
+        pass  # Default collection doesn't exist, that's fine
+
+# Try to initialize default document on startup
+initialize_default_document()
 
 app = FastAPI(title="Market Outlook RAG API")
 
@@ -208,27 +298,366 @@ def _ensure_numeric_citations(data: dict, docs: List[str], metas: List[dict]) ->
 
 @app.get("/health")
 def health():
-    # Get collection stats
-    count = col.count()
+    """Health check with collection stats."""
+    try:
+        active_col = get_active_collection()
+        count = active_col.count()
+        
+        if count == 0:
+            return {
+                "status": "ok",
+                "chroma_dir": CHROMA_DIR,
+                "allowed_origins": allowed_origins,
+                "allowed_origins_env": os.getenv("ALLOWED_ORIGINS"),
+                "collection_count": 0,
+                "pages_in_index": [],
+                "page_range": "none",
+                "total_pages_indexed": 0,
+                "message": "No documents indexed yet. Please upload a document."
+            }
+        
+        # Get all documents to see complete page range (may be slow for large indexes)
+        all_results = active_col.get(limit=count)
+        pages_in_index = set()
+        if all_results.get("metadatas"):
+            for meta in all_results["metadatas"]:
+                if "page" in meta:
+                    pages_in_index.add(meta["page"])
+        
+        return {
+            "status": "ok",
+            "chroma_dir": CHROMA_DIR,
+            "allowed_origins": allowed_origins,
+            "allowed_origins_env": os.getenv("ALLOWED_ORIGINS"),
+            "collection_count": count,
+            "pages_in_index": sorted(list(pages_in_index)) if pages_in_index else [],
+            "page_range": f"{min(pages_in_index)}-{max(pages_in_index)}" if pages_in_index else "none",
+            "total_pages_indexed": len(pages_in_index),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {
+            "status": "ok",
+            "chroma_dir": CHROMA_DIR,
+            "allowed_origins": allowed_origins,
+            "allowed_origins_env": os.getenv("ALLOWED_ORIGINS"),
+            "collection_count": 0,
+            "pages_in_index": [],
+            "page_range": "none",
+            "total_pages_indexed": 0,
+            "message": "No active document available. Please upload a document first.",
+            "error": str(e)
+        }
+
+def process_document(pdf_path: str, doc_id: str) -> dict:
+    """Process a PDF document and create a ChromaDB collection for it."""
+    try:
+        # Import ingestion modules
+        try:
+            from ingestion.pdf_parse import extract_pages
+            from ingestion.chunking import chunk_text
+        except ImportError:
+            import sys
+            sys.path.insert(0, str(ROOT))
+            from ingestion.pdf_parse import extract_pages
+            from ingestion.chunking import chunk_text
+        
+        # Extract pages
+        pages = extract_pages(pdf_path)
+        
+        # Create collection for this document
+        collection_name = f"doc_{doc_id}"
+        try:
+            ch.delete_collection(collection_name)
+        except:
+            pass
+        col = ch.get_or_create_collection(name=collection_name)
+        
+        # Process and embed chunks
+        BATCH_DOCS = 32
+        pending_ids, pending_docs, pending_metas = [], [], []
+        total_chunks = 0
+        
+        for p in pages:
+            chunks = chunk_text(p["text"], max_chars=1200, overlap=200)
+            for j, chunk in enumerate(chunks):
+                cid = f"p{p['page']}_c{j:03d}"
+                pending_ids.append(cid)
+                pending_docs.append(chunk)
+                pending_metas.append({"page": p["page"], "chunk_id": cid})
+                
+                if len(pending_docs) >= BATCH_DOCS:
+                    resp = oai.embeddings.create(
+                        model="text-embedding-3-small",
+                        input=pending_docs,
+                    )
+                    embeddings = [x.embedding for x in resp.data]
+                    col.add(
+                        ids=pending_ids,
+                        documents=pending_docs,
+                        metadatas=pending_metas,
+                        embeddings=embeddings,
+                    )
+                    total_chunks += len(pending_docs)
+                    pending_ids, pending_docs, pending_metas = [], [], []
+        
+        # Flush remainder
+        if pending_docs:
+            resp = oai.embeddings.create(
+                model="text-embedding-3-small",
+                input=pending_docs,
+            )
+            embeddings = [x.embedding for x in resp.data]
+            col.add(ids=pending_ids, documents=pending_docs, metadatas=pending_metas, embeddings=embeddings)
+            total_chunks += len(pending_docs)
+        
+        return {
+            "success": True,
+            "total_chunks": total_chunks,
+            "total_pages": len(pages)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.get("/documents")
+def list_documents():
+    """List all uploaded documents."""
+    meta = load_documents_metadata()
+    return {
+        "documents": meta.get("documents", []),
+        "active_document_id": meta.get("active_document_id")
+    }
+
+@app.get("/documents/{doc_id}/pdf")
+def get_document_pdf(doc_id: str):
+    """Serve a document's PDF file."""
+    # Check if it's the default document first
+    if doc_id == "default":
+        default_pdf = ROOT / "data" / "report.pdf"
+        if default_pdf.exists():
+            meta = load_documents_metadata()
+            documents = meta.get("documents", [])
+            doc = next((d for d in documents if d.get("id") == doc_id), None)
+            return FileResponse(
+                path=str(default_pdf),
+                media_type="application/pdf",
+                filename=doc.get("filename", "report.pdf") if doc else "report.pdf"
+            )
+        raise HTTPException(status_code=404, detail="Default PDF not found")
     
-    # Get all documents to see complete page range (may be slow for large indexes)
-    all_results = col.get(limit=count)
-    pages_in_index = set()
-    if all_results.get("metadatas"):
-        for meta in all_results["metadatas"]:
-            if "page" in meta:
-                pages_in_index.add(meta["page"])
+    # Check if uploaded PDF exists first (more reliable than metadata check)
+    pdf_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    if pdf_path.exists():
+        meta = load_documents_metadata()
+        documents = meta.get("documents", [])
+        doc = next((d for d in documents if d.get("id") == doc_id), None)
+        return FileResponse(
+            path=str(pdf_path),
+            media_type="application/pdf",
+            filename=doc.get("filename", "document.pdf") if doc else "document.pdf"
+        )
+    
+    # If PDF file doesn't exist, check metadata
+    meta = load_documents_metadata()
+    documents = meta.get("documents", [])
+    doc = next((d for d in documents if d.get("id") == doc_id), None)
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    raise HTTPException(status_code=404, detail="PDF file not found")
+
+@app.get("/documents/active/pdf")
+def get_active_document_pdf():
+    """Serve the active document's PDF file."""
+    meta = load_documents_metadata()
+    active_id = meta.get("active_document_id")
+    
+    if not active_id:
+        # Fallback to default PDF if no active document
+        default_pdf = ROOT / "data" / "report.pdf"
+        if default_pdf.exists():
+            return FileResponse(
+                path=str(default_pdf),
+                media_type="application/pdf",
+                filename="report.pdf"
+            )
+        raise HTTPException(status_code=404, detail="No active document and no default PDF found")
+    
+    # Handle default document
+    if active_id == "default":
+        default_pdf = ROOT / "data" / "report.pdf"
+        if default_pdf.exists():
+            return FileResponse(
+                path=str(default_pdf),
+                media_type="application/pdf",
+                filename="report.pdf"
+            )
+        raise HTTPException(status_code=404, detail="Default PDF not found")
+    
+    # Check if uploaded PDF exists
+    pdf_path = UPLOAD_DIR / f"{active_id}.pdf"
+    if pdf_path.exists() and pdf_path.stat().st_size > 0:
+        documents = meta.get("documents", [])
+        doc = next((d for d in documents if d.get("id") == active_id), None)
+        return FileResponse(
+            path=str(pdf_path),
+            media_type="application/pdf",
+            filename=doc.get("filename", "document.pdf") if doc else "document.pdf"
+        )
+    
+    # If PDF doesn't exist, log and try to serve default as fallback
+    print(f"[WARN] Uploaded PDF not found at {pdf_path} for active_id {active_id}, falling back to default PDF")
+    default_pdf = ROOT / "data" / "report.pdf"
+    if default_pdf.exists():
+        return FileResponse(
+            path=str(default_pdf),
+            media_type="application/pdf",
+            filename="report.pdf"
+        )
+    
+    raise HTTPException(status_code=404, detail=f"PDF file not found for active document {active_id}")
+
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """Upload and process a PDF document."""
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
+    # Generate document ID
+    doc_id = str(uuid.uuid4())
+    filename = file.filename
+    file_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    
+    # Save uploaded file
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Get file size
+    file_size = file_path.stat().st_size
+    
+    # Load metadata
+    meta = load_documents_metadata()
+    documents = meta.get("documents", [])
+    
+    # Add document entry
+    doc_entry = {
+        "id": doc_id,
+        "filename": filename,
+        "uploaded_at": datetime.now().isoformat(),
+        "file_size": file_size,
+        "status": "processing",
+        "chunks": 0,
+        "pages": 0
+    }
+    documents.append(doc_entry)
+    
+    # Always make newly uploaded document active (overrides default if it exists)
+    meta["active_document_id"] = doc_id
+    
+    meta["documents"] = documents
+    save_documents_metadata(meta)
+    
+    # Process document asynchronously
+    def process_async():
+        result = process_document(str(file_path), doc_id)
+        meta = load_documents_metadata()
+        documents = meta.get("documents", [])
+        doc = next((d for d in documents if d["id"] == doc_id), None)
+        if doc:
+            if result["success"]:
+                doc["status"] = "processed"
+                doc["chunks"] = result["total_chunks"]
+                doc["pages"] = result["total_pages"]
+            else:
+                doc["status"] = "error"
+                doc["error"] = result.get("error", "Unknown error")
+        meta["documents"] = documents
+        save_documents_metadata(meta)
+    
+    # Start processing in background thread
+    thread = threading.Thread(target=process_async)
+    thread.daemon = True
+    thread.start()
     
     return {
-        "status": "ok",
-        "chroma_dir": CHROMA_DIR,
-        "allowed_origins": allowed_origins,
-        "allowed_origins_env": os.getenv("ALLOWED_ORIGINS"),
-        "collection_count": count,
-        "pages_in_index": sorted(list(pages_in_index)) if pages_in_index else [],
-        "page_range": f"{min(pages_in_index)}-{max(pages_in_index)}" if pages_in_index else "none",
-        "total_pages_indexed": len(pages_in_index),
+        "id": doc_id,
+        "filename": filename,
+        "status": "processing",
+        "message": "Document uploaded. Processing in background."
     }
+
+@app.post("/documents/{doc_id}/activate")
+def activate_document(doc_id: str):
+    """Set a document as the active document for queries."""
+    meta = load_documents_metadata()
+    documents = meta.get("documents", [])
+    doc = next((d for d in documents if d["id"] == doc_id), None)
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    if doc.get("status") != "processed":
+        raise HTTPException(status_code=400, detail="Document is not yet processed")
+    
+    meta["active_document_id"] = doc_id
+    save_documents_metadata(meta)
+    
+    # Reload collection
+    global col
+    col = get_active_collection()
+    
+    return {
+        "message": f"Document '{doc['filename']}' is now active",
+        "active_document_id": doc_id
+    }
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Delete a document and its collection."""
+    meta = load_documents_metadata()
+    documents = meta.get("documents", [])
+    doc = next((d for d in documents if d["id"] == doc_id), None)
+    
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Remove from list
+    documents = [d for d in documents if d["id"] != doc_id]
+    meta["documents"] = documents
+    
+    # If it was active, set another document as active (or None)
+    if meta.get("active_document_id") == doc_id:
+        if documents:
+            # Find first processed document
+            processed = next((d for d in documents if d.get("status") == "processed"), None)
+            meta["active_document_id"] = processed["id"] if processed else None
+        else:
+            meta["active_document_id"] = None
+    
+    save_documents_metadata(meta)
+    
+    # Delete collection
+    try:
+        collection_name = f"doc_{doc_id}"
+        ch.delete_collection(collection_name)
+    except:
+        pass
+    
+    # Delete file
+    file_path = UPLOAD_DIR / f"{doc_id}.pdf"
+    if file_path.exists():
+        file_path.unlink()
+    
+    # Reload collection if needed
+    global col
+    col = get_active_collection()
+    
+    return {"message": f"Document '{doc['filename']}' deleted"}
 
 @app.options("/ask")
 @app.options("/api/ask")
@@ -411,7 +840,8 @@ def ask(req: AskRequest):
     ).data[0].embedding
 
     # 2) Retrieve chunks
-    results = col.query(
+    active_col = get_active_collection()
+    results = active_col.query(
         query_embeddings=[q_emb],
         n_results=req.top_k,
         include=["documents", "metadatas", "distances"]
@@ -577,7 +1007,8 @@ def ask_stream(req: AskRequest):
     ).data[0].embedding
 
     # 2) Retrieve chunks
-    results = col.query(
+    active_col = get_active_collection()
+    results = active_col.query(
         query_embeddings=[q_emb],
         n_results=req.top_k,
         include=["documents", "metadatas", "distances"]
@@ -819,7 +1250,8 @@ def ask_compare_stream(req: AskRequest):
         ).data[0].embedding
 
         # 2) Retrieve chunks
-        results = col.query(
+        active_col = get_active_collection()
+        results = active_col.query(
             query_embeddings=[q_emb],
             n_results=req.top_k,
             include=["documents", "metadatas", "distances"]
@@ -870,7 +1302,8 @@ def ask_compare(req: AskRequest):
     ).data[0].embedding
 
     # 2) Retrieve chunks
-    results = col.query(
+    active_col = get_active_collection()
+    results = active_col.query(
         query_embeddings=[q_emb],
         n_results=req.top_k,
         include=["documents", "metadatas", "distances"]
@@ -909,18 +1342,123 @@ def ask_compare(req: AskRequest):
 @app.post("/suggest-questions", response_model=SuggestedQuestionsResponse)
 @app.post("/api/suggest-questions", response_model=SuggestedQuestionsResponse)
 def suggest_questions(req: SuggestedQuestionsRequest):
-    """Generate contextual follow-up questions based on conversation history."""
-    # Default questions if no history
-    default_questions = [
-        "What does the report say about the secondaries market and liquidity?",
-        "What does the report say about the outlook for real estate sectors like data centers and life sciences, and what demand drivers does it cite?",
-        "What are the key risks and opportunities discussed for private credit?",
-        "What does the report highlight about infrastructure and energy transition?",
-    ]
+    """Generate contextual follow-up questions based on conversation history or document content."""
     
-    # If no conversation history, return default questions
+    # If no conversation history, generate questions based on document content
     if not req.conversation_history or len(req.conversation_history) == 0:
-        return SuggestedQuestionsResponse(questions=default_questions)
+        try:
+            # Get active collection
+            active_col = get_active_collection()
+            
+            if active_col.count() == 0:
+                # Return generic questions if collection is empty
+                return SuggestedQuestionsResponse(questions=[
+                    "What are the main topics covered in this document?",
+                    "What are the key findings or conclusions?",
+                    "What are the important statistics or data points mentioned?",
+                    "What recommendations or insights are provided?",
+                ])
+            
+            # Retrieve diverse chunks from the document to understand its content
+            # Use a general query to get representative content
+            try:
+                # Get random chunks from different parts of the document
+                all_results = active_col.get(limit=min(20, active_col.count()))
+                docs = all_results.get("documents", [])
+                metas = all_results.get("metadatas", [])
+                
+                if not docs:
+                    raise ValueError("No documents in collection")
+                
+                # Sample diverse chunks
+                sample_size = min(10, len(docs))
+                step = max(1, len(docs) // sample_size)
+                sampled_docs = docs[::step][:sample_size]
+                sampled_text = "\n\n".join([f"[Page {metas[i*step]['page']}] {doc[:300]}" for i, doc in enumerate(sampled_docs) if i*step < len(metas)])
+                
+                # Generate questions based on document content using LLM
+                provider = get_provider("openai")
+                
+                system_prompt = (
+                    "You are a helpful assistant that generates relevant questions for a document Q&A system. "
+                    "Based on the provided document excerpts, generate 4 concise, specific questions that would help users "
+                    "understand and explore the document's content. "
+                    "Questions should: "
+                    "- Be specific and answerable from the document "
+                    "- Cover different important topics in the document "
+                    "- Be natural and conversational "
+                    "- Help users get started exploring the document "
+                    "\n\nReturn ONLY a JSON array of exactly 4 question strings, no other text."
+                )
+                
+                user_prompt = f"Document excerpts:\n\n{sampled_text}\n\nGenerate 4 questions:"
+                
+                try:
+                    response_text = provider.generate(system_prompt, user_prompt)
+                    # Extract JSON array from response
+                    import re
+                    json_match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+                    if json_match:
+                        questions_json = json.loads(json_match.group())
+                        if isinstance(questions_json, list) and len(questions_json) >= 4:
+                            return SuggestedQuestionsResponse(questions=questions_json[:4])
+                except Exception as e:
+                    print(f"[WARN] Failed to generate questions from document: {e}")
+                
+                # Fallback: generate questions from key topics
+                # Use a summary query to identify topics
+                topics_query = "What are the main topics, themes, and key subjects discussed in this document?"
+                topics_emb = oai.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=topics_query
+                ).data[0].embedding
+                
+                topics_results = active_col.query(
+                    query_embeddings=[topics_emb],
+                    n_results=8,
+                    include=["documents", "metadatas"]
+                )
+                
+                topics_docs = topics_results["documents"][0]
+                topics_text = "\n\n".join([doc[:200] for doc in topics_docs[:5]])
+                
+                user_prompt = f"Based on these document excerpts:\n\n{topics_text}\n\nGenerate 4 specific questions users might ask:"
+                
+                response_text = provider.generate(system_prompt, user_prompt)
+                json_match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+                if json_match:
+                    questions_json = json.loads(json_match.group())
+                    if isinstance(questions_json, list) and len(questions_json) >= 4:
+                        return SuggestedQuestionsResponse(questions=questions_json[:4])
+                
+                # Final fallback
+                return SuggestedQuestionsResponse(questions=[
+                    "What are the main topics covered in this document?",
+                    "What are the key findings or conclusions?",
+                    "What important data or statistics are mentioned?",
+                    "What recommendations or next steps are provided?",
+                ])
+                
+            except Exception as e:
+                print(f"[WARN] Error generating document-based questions: {e}")
+                # Fallback to generic questions
+                return SuggestedQuestionsResponse(questions=[
+                    "What are the main topics covered in this document?",
+                    "What are the key findings or conclusions?",
+                    "What are the important statistics or data points mentioned?",
+                    "What recommendations or insights are provided?",
+                ])
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[WARN] Error in suggest_questions: {e}")
+            # Return generic questions on error
+            return SuggestedQuestionsResponse(questions=[
+                "What are the main topics covered in this document?",
+                "What are the key findings or conclusions?",
+                "What are the important statistics or data points mentioned?",
+                "What recommendations or insights are provided?",
+            ])
     
     # Generate contextual follow-up questions using LLM
     try:
