@@ -239,11 +239,20 @@ The system automatically:
 - **Provider Caching**: Efficient provider instance management
 - **Error Handling**: Graceful fallbacks if a provider fails
 
+### Document Management System
+- **Per-Document Collections**: Each uploaded document gets its own ChromaDB collection
+- **Isolated RAG**: Queries only search within the active document's collection
+- **Metadata Tracking**: Documents store filename, size, page count, chunk count, status, and timestamps
+- **Asynchronous Processing**: Documents are processed in the background after upload
+- **Active Document**: Only one document is active at a time, used for all queries
+- **PDF Serving**: Active document's PDF is automatically served to the PDF viewer
+- **Default Document**: Falls back to default `report.pdf` if no document is active
+
 ### Conversation Context
 - **History Tracking**: Automatically tracks all Q&A pairs in the session
 - **Citation Preservation**: All citations (page numbers and quotes) are saved with each Q&A pair
 - **Context Window**: Includes last 3 Q&A pairs in prompts for follow-up questions
-- **Smart Suggestions**: AI generates contextual follow-up questions based on conversation
+- **Smart Suggestions**: AI generates contextual follow-up questions based on conversation and active document content
 - **Export Options**: Copy to clipboard (with citations) or export as formatted PDF (with sources)
 - **Expandable Display**: View full answers with expand/collapse functionality
 - **Quick Navigation**: Click citation buttons in history to jump directly to PDF pages
