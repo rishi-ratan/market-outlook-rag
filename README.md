@@ -561,44 +561,48 @@ The system automatically:
 
 ### Vercel Deployment Issues
 
-**404 Error or Build Fails:**
-1. **Check Root Directory**: Go to Vercel Dashboard → Settings → General
-   - **Root Directory**: Must be set to `apps/web` ⚠️ **MOST IMPORTANT**
-   - If set to `.` (root), change it to `apps/web` and redeploy
-2. **Verify Project Structure**: Vercel should see `package.json`, `app/` directory, and `next.config.ts` in `apps/web/`
-3. **Check Build Logs**: Go to Deployments → Click failed deployment → View Build Logs for specific errors
+**⚠️ CRITICAL: Check These First!**
 
-**Environment Variables Not Set:**
-1. Go to Vercel Dashboard → Settings → Environment Variables
-2. Add: `NEXT_PUBLIC_API_BASE` with your backend URL
-3. **Important**: Select all environments (Production, Preview, Development)
-4. Save and redeploy
+**1. Root Directory (Most Common Issue):**
+- Go to Vercel Dashboard → Your Project → **Settings** → **General**
+- **Root Directory**: MUST be `apps/web` ⚠️ **NOT `.` or empty**
+- If wrong, change it, **Save**, and **Redeploy**
 
-**Build Command Fails:**
-1. **Test Build Locally**:
-   ```bash
-   cd apps/web
-   npm install
-   npm run build
-   ```
-2. Fix any TypeScript errors or missing dependencies locally first
-3. Common issues:
-   - TypeScript errors → Fix in code
-   - Missing dependencies → Check `package.json`
-   - "Cannot find module" → Install missing package
+**2. Environment Variable (Required):**
+- Go to Vercel Dashboard → **Settings** → **Environment Variables**
+- Add: `NEXT_PUBLIC_API_BASE`
+- Value: Your Railway backend URL (e.g., `https://your-app.railway.app`)
+- **Select ALL**: Production ✅ Preview ✅ Development ✅
+- **Save** and **Redeploy**
 
-**Wrong Branch Connected:**
-1. Go to Settings → Git
-2. Verify correct repository: `rishi-ratan/market-outlook-rag`
-3. Verify correct branch: `rag-docs` (or your active branch)
-4. Auto-deploy should be enabled
+**3. Git Connection:**
+- Go to **Settings** → **Git**
+- Verify: Repository = `rishi-ratan/market-outlook-rag`
+- Verify: Branch = `rag-docs` (or your active branch)
+- Auto-deploy should be **Enabled**
 
-**Quick Vercel Fix Checklist:**
-- ✅ Root Directory = `apps/web` (not `.`)
-- ✅ `NEXT_PUBLIC_API_BASE` environment variable set
-- ✅ Correct branch connected
-- ✅ Build succeeds locally (`npm run build` in `apps/web`)
-- ✅ Check build logs for specific errors
+**4. Build Logs:**
+- Go to **Deployments** → Click latest deployment → **Build Logs**
+- Look for specific errors:
+  - TypeScript errors → Fix in code
+  - Missing dependencies → Check `package.json`
+  - "Cannot find module" → Install missing package
+
+**5. Test Build Locally:**
+```bash
+cd apps/web
+npm install
+npm run build
+```
+If local build fails, fix errors first, then push and redeploy.
+
+**Quick Checklist:**
+- ✅ Root Directory = `apps/web` (NOT `.`)
+- ✅ `NEXT_PUBLIC_API_BASE` environment variable set with Railway URL
+- ✅ All environments selected (Production, Preview, Development)
+- ✅ Correct branch connected (`rag-docs`)
+- ✅ Build succeeds locally
+- ✅ Check Vercel build logs for specific errors
 
 ## 📚 Additional Resources
 
