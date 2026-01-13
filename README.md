@@ -363,6 +363,22 @@ If you prefer Railway:
 - `OPENAI_VISION_MODEL` (optional): `gpt-4o-mini`, `gpt-4o`, or `gpt-4-turbo`
 - `PORT` (auto-set by platform)
 
+**Quick Import .env to Railway (CLI):**
+```bash
+# Install Railway CLI
+# Windows: iwr https://railway.app/install.ps1 | iex
+# Mac/Linux: curl -fsSL https://railway.app/install.sh | sh
+
+# Link your project
+railway link
+
+# Import all variables from .env file
+railway variables --file .env
+```
+
+**Manual Setup (No CLI):**
+Go to Railway → Your Service → Variables → Add each variable manually
+
 **Frontend (Vercel):**
 - `NEXT_PUBLIC_API_BASE` (required): Your backend URL
 
