@@ -365,15 +365,25 @@ If you prefer Railway:
 
 **Quick Import .env to Railway (CLI):**
 ```bash
-# Install Railway CLI
-# Windows: iwr https://railway.app/install.ps1 | iex
-# Mac/Linux: curl -fsSL https://railway.app/install.sh | sh
+# Install Railway CLI (using npm - works on all platforms)
+npm install -g @railway/cli
+
+# Or using other package managers:
+# yarn global add @railway/cli
+# pnpm add -g @railway/cli
+
+# Login to Railway
+railway login
 
 # Link your project
 railway link
+# (Select your project when prompted)
 
 # Import all variables from .env file
-railway variables --file .env
+railway env import .env
+
+# Verify variables were imported
+railway env list
 ```
 
 **Manual Setup (No CLI):**
