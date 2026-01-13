@@ -51,20 +51,17 @@ else
 fi
 
 # Build index if it doesn't exist or is empty
+# NOTE: For Railway, we skip index building on startup to make the app respond faster
+# Users can upload documents via the UI, which will trigger index building
 if [ "$INDEX_EXISTS" = false ]; then
-    echo "ChromaDB index not found or incomplete. Building index from PDF..."
-    # Check if OPENAI_API_KEY is set before trying to build
+    echo "ChromaDB index not found or incomplete."
+    # Skip building on startup for Railway - app will start immediately
+    # Index can be built by uploading documents through the UI
+    echo "⚠️  Index build skipped on startup for faster deployment."
+    echo "   Upload documents through the UI to build the index."
     if [ -z "$OPENAI_API_KEY" ]; then
-        echo "⚠️  WARNING: OPENAI_API_KEY not set. Skipping index build."
-        echo "   You can upload documents through the UI once the server starts."
-    else
-        echo "Building index with OPENAI_API_KEY..."
-        if python3 -m ingestion.build_index 2>&1; then
-            echo "✅ Index build complete!"
-        else
-            echo "⚠️  WARNING: Index build failed. Server will start anyway."
-            echo "   You can upload documents through the UI once the server starts."
-        fi
+        echo "⚠️  WARNING: OPENAI_API_KEY not set."
+        echo "   Set OPENAI_API_KEY in Railway variables, then upload documents through the UI."
     fi
 else
     echo "✅ ChromaDB index found. Skipping build."
