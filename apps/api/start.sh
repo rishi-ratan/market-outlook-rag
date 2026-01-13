@@ -31,8 +31,17 @@ fi
 # Build index if it doesn't exist or is empty
 if [ "$INDEX_EXISTS" = false ]; then
     echo "ChromaDB index not found or incomplete. Building index from PDF..."
-    python3 -m ingestion.build_index
-    echo "✅ Index build complete!"
+    # Check if OPENAI_API_KEY is set before trying to build
+    if [ -z "$OPENAI_API_KEY" ]; then
+        echo "⚠️  WARNING: OPENAI_API_KEY not set. Skipping index build."
+        echo "   You can upload documents through the UI once the server starts."
+    else
+        python3 -m ingestion.build_index || {
+            echo "⚠️  WARNING: Index build failed. Server will start anyway."
+            echo "   You can upload documents through the UI once the server starts."
+        }
+        echo "✅ Index build complete!"
+    fi
 else
     echo "✅ ChromaDB index found. Skipping build."
 fi

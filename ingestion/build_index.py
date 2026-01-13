@@ -59,7 +59,7 @@ def main():
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY in .env")
+        raise RuntimeError("Missing OPENAI_API_KEY environment variable. Set it in your environment or .env file.")
 
     oai = OpenAI(api_key=api_key)
 
