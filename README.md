@@ -363,30 +363,33 @@ If you prefer Railway:
 - `OPENAI_VISION_MODEL` (optional): `gpt-4o-mini`, `gpt-4o`, or `gpt-4-turbo`
 - `PORT` (auto-set by platform)
 
-**Quick Import .env to Railway (CLI):**
+**Import .env to Railway - Easiest Method (RAW Editor):**
+1. Go to Railway → Your Service → **Variables** tab
+2. Click **"RAW Editor"** button
+3. Copy entire content of your `.env` file
+4. Paste into the RAW Editor
+5. Click **Save**
+6. All variables are now imported! ✅
+
+**Alternative: Railway CLI:**
 ```bash
-# Install Railway CLI (using npm - works on all platforms)
+# Install Railway CLI
 npm install -g @railway/cli
 
-# Or using other package managers:
-# yarn global add @railway/cli
-# pnpm add -g @railway/cli
-
-# Login to Railway
+# Login
 railway login
 
-# Link your project
+# Link project
 railway link
-# (Select your project when prompted)
 
-# Import all variables from .env file
+# Import .env file
 railway env import .env
 
-# Verify variables were imported
+# Verify
 railway env list
 ```
 
-**Manual Setup (No CLI):**
+**Manual Method (if above don't work):**
 Go to Railway → Your Service → Variables → Add each variable manually
 
 **Frontend (Vercel):**
