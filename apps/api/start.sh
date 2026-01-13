@@ -47,7 +47,13 @@ else
 fi
 
 # Start the API server
-echo "Starting API server on port ${PORT:-8000}..."
+PORT=${PORT:-8000}
+echo "Starting API server on port ${PORT}..."
+echo "Host: 0.0.0.0"
+echo "Port: ${PORT}"
+echo "PYTHONPATH: ${PYTHONPATH:-/app}"
+
 # Use PORT environment variable if set (Railway/Render), otherwise default to 8000
-exec python -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Railway automatically sets PORT, so we use it directly
+exec python -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info
 

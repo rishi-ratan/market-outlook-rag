@@ -379,6 +379,11 @@ def _ensure_numeric_citations(data: dict, docs: List[str], metas: List[dict]) ->
     data["citations"] = citations
     return data
 
+@app.get("/")
+def root():
+    """Root endpoint - simple health check."""
+    return {"status": "ok", "message": "Market Outlook RAG API is running"}
+
 @app.get("/health")
 def health():
     """Health check with collection stats."""
