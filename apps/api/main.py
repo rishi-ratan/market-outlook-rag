@@ -31,10 +31,20 @@ ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env", override=False)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY. Set it in the environment (or locally in ROOT/.env).")
 
-oai = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize OpenAI client only if API key is available
+# This allows the server to start even if the key is missing (will fail gracefully when used)
+if OPENAI_API_KEY:
+    oai = OpenAI(api_key=OPENAI_API_KEY)
+else:
+    # Create a dummy object that will raise a helpful error when used
+    class MissingAPIKeyError:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please set it in Railway/Render settings (Settings → Variables → Add OPENAI_API_KEY)."
+            )
+    oai = MissingAPIKeyError()
 
 CHROMA_DIR = os.getenv("CHROMA_DIR", str(ROOT / "storage" / "chroma"))
 UPLOAD_DIR = ROOT / "storage" / "uploads"
