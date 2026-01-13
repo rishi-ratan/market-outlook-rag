@@ -1,0 +1,32 @@
+{
+  "documents": [
+    {
+      "id": "3abdd658-8fcb-42b3-a786-45b5a009401e",
+      "filename": "How Greenland Falls _ Foreign Affairs.pdf",
+      "uploaded_at": "2026-01-12T18:37:55.237608",
+      "file_size": 278267,
+      "status": "processed",
+      "chunks": 17,
+      "pages": 9
+    },
+    {
+      "id": "9053b6ef-c4d3-4510-b708-66a4d57b10cc",
+      "filename": "GATE_VAST_IM_Dec2025.pdf",
+      "uploaded_at": "2026-01-13T14:01:25.075227",
+      "file_size": 4868816,
+      "status": "processing",
+      "chunks": 0,
+      "pages": 0
+    },
+    {
+      "id": "default",
+      "filename": "report.pdf",
+      "uploaded_at": "2026-01-13T15:53:08.734670",
+      "file_size": 0,
+      "status": "processed",
+      "chunks": 93,
+      "pages": 0
+    }
+  ],
+  "active_document_id": "9053b6ef-c4d3-4510-b708-66a4d57b10cc"
+}

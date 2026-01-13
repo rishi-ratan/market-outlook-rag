@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: market-outlook-rag-api
+    env: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: ENABLE_VISION_ANALYSIS
+        value: "false"
+      - key: OPENAI_VISION_MODEL
+        value: "gpt-4o"
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /health

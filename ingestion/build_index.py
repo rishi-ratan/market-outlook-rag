@@ -20,6 +20,11 @@ except: pass
 
 from ingestion.pdf_parse import extract_pages
 from ingestion.chunking import chunk_text
+from ingestion.visual_extraction import (
+    extract_visual_data_from_pdf,
+    format_table_as_text,
+    format_chart_analysis_as_text
+)
 
 # #region agent log
 try:
@@ -110,29 +115,68 @@ def main():
 
     total_chunks = 0
     page_count = 0
+    all_visual_data = {}  # Store visual data by page
+    
     for p in pages:
         page_count += 1
+        page_num = p["page"]
         # #region agent log
         try:
             if page_count % 5 == 0 or page_count == 1:
                 with open(LOG_PATH, "a") as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "build_index.py:70", "message": "Processing page in loop", "data": {"page_num": p["page"], "page_count": page_count, "pending_docs_len": len(pending_docs), "total_chunks": total_chunks}, "timestamp": int(time.time() * 1000)}) + "\n")
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "build_index.py:70", "message": "Processing page in loop", "data": {"page_num": page_num, "page_count": page_count, "pending_docs_len": len(pending_docs), "total_chunks": total_chunks}, "timestamp": int(time.time() * 1000)}) + "\n")
         except: pass
         # #endregion
-        chunks = chunk_text(p["text"], max_chars=1200, overlap=200)  # slightly smaller chunks
+        
+        # Extract visual data for this page
+        # Enable vision via environment variable: ENABLE_VISION_ANALYSIS=true
+        use_vision = os.getenv("ENABLE_VISION_ANALYSIS", "false").lower() == "true"
+        visual_data = extract_visual_data_from_pdf(
+            str(pdf_path),
+            page_num,
+            use_vision=use_vision,
+            api_key=api_key
+        )
+        all_visual_data[page_num] = visual_data
+        
+        # Enhance text with visual data
+        page_text = p["text"]
+        
+        # Add table text to page content
+        for table in visual_data.get("tables", []):
+            table_text = format_table_as_text(table)
+            if table_text:
+                page_text += "\n\n" + table_text
+        
+        # Add chart analysis text to page content
+        for chart in visual_data.get("chart_analyses", []):
+            chart_text = format_chart_analysis_as_text(chart)
+            if chart_text:
+                page_text += "\n\n" + chart_text
+        
+        chunks = chunk_text(page_text, max_chars=1200, overlap=200)  # slightly smaller chunks
         # #region agent log
         try:
             if page_count % 5 == 0 or page_count == 1:
                 with open(LOG_PATH, "a") as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "build_index.py:75", "message": "Chunks created for page", "data": {"page_num": p["page"], "num_chunks": len(chunks)}, "timestamp": int(time.time() * 1000)}) + "\n")
+                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "build_index.py:75", "message": "Chunks created for page", "data": {"page_num": page_num, "num_chunks": len(chunks)}, "timestamp": int(time.time() * 1000)}) + "\n")
         except: pass
         # #endregion
         
         for j, chunk in enumerate(chunks):
-            cid = f"p{p['page']}_c{j:03d}"
+            cid = f"p{page_num}_c{j:03d}"
             pending_ids.append(cid)
             pending_docs.append(chunk)
-            pending_metas.append({"page": p["page"], "chunk_id": cid})
+            
+            # Enhanced metadata with visual data info
+            meta = {
+                "page": page_num,
+                "chunk_id": cid,
+                "has_tables": len(visual_data.get("tables", [])) > 0,
+                "has_charts": len(visual_data.get("chart_analyses", [])) > 0,
+                "table_count": len(visual_data.get("tables", []))
+            }
+            pending_metas.append(meta)
 
             if len(pending_docs) >= BATCH_DOCS:
                 # #region agent log

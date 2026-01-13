@@ -178,6 +178,7 @@ class AskResponse(BaseModel):
     citations: List[Citation]
     not_found: bool
     provider: Optional[str] = None
+    visual_data: Optional[Dict] = None  # Tables, charts, images from cited pages
 
 class ComparisonResponse(BaseModel):
     question: str
@@ -230,6 +231,78 @@ def _snippet_around(text: str, needle: str, window: int = 90) -> str:
     if len(snippet) > 120:
         snippet = snippet[:117].rstrip() + "…"
     return snippet
+
+
+def _get_visual_data_for_citations(citations: List[dict], metas: List[dict]) -> Optional[Dict]:
+    """Retrieve visual data (tables, charts) for pages cited in the response."""
+    if not citations:
+        return None
+    
+    # Get unique pages from citations
+    cited_pages = set()
+    for citation in citations:
+        if isinstance(citation, dict) and "page" in citation:
+            cited_pages.add(citation["page"])
+    
+    if not cited_pages:
+        return None
+    
+    # Get active document ID
+    meta = load_documents_metadata()
+    active_doc_id = meta.get("active_document_id")
+    
+    if not active_doc_id:
+        # Try default document
+        visual_data_file = ROOT / "storage" / "visual_data" / "default.json"
+    else:
+        visual_data_file = ROOT / "storage" / "visual_data" / f"{active_doc_id}.json"
+    
+    if not visual_data_file.exists():
+        return None
+    
+    try:
+        with open(visual_data_file, "r") as f:
+            all_visual_data = json.load(f)
+        
+        # Extract visual data for cited pages
+        result = {
+            "tables": [],
+            "charts": [],
+            "images": []
+        }
+        
+        for page_num in cited_pages:
+            page_visual = all_visual_data.get(str(page_num), {})
+            
+            # Add tables
+            for table in page_visual.get("tables", []):
+                # Don't include base64 images in response (too large)
+                # Just include table structure
+                table_copy = {
+                    "table_id": table.get("table_id"),
+                    "page": table.get("page"),
+                    "rows": table.get("rows", [])[:20],  # Limit rows for response size
+                    "row_count": table.get("row_count"),
+                    "col_count": table.get("col_count")
+                }
+                result["tables"].append(table_copy)
+            
+            # Add chart analyses
+            for chart in page_visual.get("chart_analyses", []):
+                chart_copy = {
+                    "page": chart.get("page"),
+                    "analysis": chart.get("analysis", {}),
+                    "model": chart.get("model")
+                }
+                result["charts"].append(chart_copy)
+        
+        # Only return if we have visual data
+        if result["tables"] or result["charts"] or result["images"]:
+            return result
+    except Exception as e:
+        print(f"[WARN] Failed to load visual data: {e}")
+    
+    return None
 
 
 def _ensure_numeric_citations(data: dict, docs: List[str], metas: List[dict]) -> dict:
@@ -350,18 +423,34 @@ def health():
             "error": str(e)
         }
 
-def process_document(pdf_path: str, doc_id: str) -> dict:
-    """Process a PDF document and create a ChromaDB collection for it."""
+def process_document(pdf_path: str, doc_id: str, use_vision: bool = False) -> dict:
+    """Process a PDF document and create a ChromaDB collection for it.
+    
+    Args:
+        pdf_path: Path to the PDF file
+        doc_id: Document ID
+        use_vision: Whether to use GPT-4 Vision for chart analysis (slower, more expensive)
+    """
     try:
         # Import ingestion modules
         try:
             from ingestion.pdf_parse import extract_pages
             from ingestion.chunking import chunk_text
+            from ingestion.visual_extraction import (
+                extract_visual_data_from_pdf,
+                format_table_as_text,
+                format_chart_analysis_as_text
+            )
         except ImportError:
             import sys
             sys.path.insert(0, str(ROOT))
             from ingestion.pdf_parse import extract_pages
             from ingestion.chunking import chunk_text
+            from ingestion.visual_extraction import (
+                extract_visual_data_from_pdf,
+                format_table_as_text,
+                format_chart_analysis_as_text
+            )
         
         # Extract pages
         pages = extract_pages(pdf_path)
@@ -374,18 +463,71 @@ def process_document(pdf_path: str, doc_id: str) -> dict:
             pass
         col = ch.get_or_create_collection(name=collection_name)
         
-        # Process and embed chunks
+        # Process and embed chunks with visual data
         BATCH_DOCS = 32
         pending_ids, pending_docs, pending_metas = [], [], []
         total_chunks = 0
+        total_tables = 0
+        total_charts = 0
         
         for p in pages:
-            chunks = chunk_text(p["text"], max_chars=1200, overlap=200)
+            page_num = p["page"]
+            
+            # Extract visual data for this page
+            visual_data = extract_visual_data_from_pdf(
+                pdf_path, 
+                page_num, 
+                use_vision=use_vision,
+                api_key=OPENAI_API_KEY if use_vision else None
+            )
+            
+            # Count visual elements
+            total_tables += len(visual_data.get("tables", []))
+            total_charts += len(visual_data.get("chart_analyses", []))
+            
+            # Enhance text with visual data
+            page_text = p["text"]
+            
+            # Add table text to page content
+            for table in visual_data.get("tables", []):
+                table_text = format_table_as_text(table)
+                if table_text:
+                    page_text += "\n\n" + table_text
+            
+            # Add chart analysis text to page content
+            for chart in visual_data.get("chart_analyses", []):
+                chart_text = format_chart_analysis_as_text(chart)
+                if chart_text:
+                    page_text += "\n\n" + chart_text
+            
+            # Chunk the enhanced text
+            chunks = chunk_text(page_text, max_chars=1200, overlap=200)
+            
             for j, chunk in enumerate(chunks):
-                cid = f"p{p['page']}_c{j:03d}"
+                cid = f"p{page_num}_c{j:03d}"
                 pending_ids.append(cid)
                 pending_docs.append(chunk)
-                pending_metas.append({"page": p["page"], "chunk_id": cid})
+                
+                # Enhanced metadata with visual data info
+                # Note: ChromaDB metadata only supports primitive types (str, int, float, bool, None)
+                # Lists must be converted to strings or removed
+                meta = {
+                    "page": page_num,
+                    "chunk_id": cid,
+                    "has_tables": len(visual_data.get("tables", [])) > 0,
+                    "has_charts": len(visual_data.get("chart_analyses", [])) > 0,
+                    "table_count": len(visual_data.get("tables", []))
+                }
+                
+                # Store visual data references as comma-separated strings (ChromaDB doesn't support lists)
+                if visual_data.get("tables"):
+                    table_ids = [t["table_id"] for t in visual_data["tables"]]
+                    meta["table_ids"] = ",".join(table_ids)  # Convert list to comma-separated string
+                if visual_data.get("chart_analyses"):
+                    chart_ids = [f"p{page_num}_chart{i}" for i in range(len(visual_data["chart_analyses"]))]
+                    meta["chart_ids"] = ",".join(chart_ids)  # Convert list to comma-separated string
+                
+                pending_metas.append(meta)
                 
                 if len(pending_docs) >= BATCH_DOCS:
                     resp = oai.embeddings.create(
@@ -412,15 +554,38 @@ def process_document(pdf_path: str, doc_id: str) -> dict:
             col.add(ids=pending_ids, documents=pending_docs, metadatas=pending_metas, embeddings=embeddings)
             total_chunks += len(pending_docs)
         
+        # Store visual data separately for retrieval
+        visual_data_file = ROOT / "storage" / "visual_data" / f"{doc_id}.json"
+        visual_data_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Collect all visual data by page
+        all_visual_data = {}
+        for p in pages:
+            page_num = p["page"]
+            visual_data = extract_visual_data_from_pdf(
+                pdf_path,
+                page_num,
+                use_vision=use_vision,
+                api_key=OPENAI_API_KEY if use_vision else None
+            )
+            all_visual_data[page_num] = visual_data
+        
+        with open(visual_data_file, "w") as f:
+            json.dump(all_visual_data, f, indent=2)
+        
         return {
             "success": True,
             "total_chunks": total_chunks,
-            "total_pages": len(pages)
+            "total_pages": len(pages),
+            "total_tables": total_tables,
+            "total_charts": total_charts
         }
     except Exception as e:
+        import traceback
         return {
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
 
 @app.get("/documents")
@@ -564,7 +729,10 @@ async def upload_document(file: UploadFile = File(...)):
     
     # Process document asynchronously
     def process_async():
-        result = process_document(str(file_path), doc_id)
+        # Enable vision analysis (set to False to disable and save costs)
+        # Vision analysis uses GPT-4 Vision API which is more expensive
+        use_vision = os.getenv("ENABLE_VISION_ANALYSIS", "false").lower() == "true"
+        result = process_document(str(file_path), doc_id, use_vision=use_vision)
         meta = load_documents_metadata()
         documents = meta.get("documents", [])
         doc = next((d for d in documents if d["id"] == doc_id), None)
@@ -615,6 +783,51 @@ def activate_document(doc_id: str):
         "message": f"Document '{doc['filename']}' is now active",
         "active_document_id": doc_id
     }
+
+@app.get("/documents/{doc_id}/visual/{page_num}")
+def get_document_visual_data(doc_id: str, page_num: int):
+    """Get visual data (tables, charts) for a specific page of a document."""
+    visual_data_file = ROOT / "storage" / "visual_data" / f"{doc_id}.json"
+    
+    if not visual_data_file.exists():
+        raise HTTPException(status_code=404, detail="Visual data not found for this document")
+    
+    try:
+        with open(visual_data_file, "r") as f:
+            all_visual_data = json.load(f)
+        
+        page_visual = all_visual_data.get(str(page_num), {})
+        
+        if not page_visual:
+            return {
+                "page": page_num,
+                "tables": [],
+                "charts": [],
+                "images": []
+            }
+        
+        # Return visual data (limit table rows for response size)
+        result = {
+            "page": page_num,
+            "tables": [],
+            "charts": page_visual.get("chart_analyses", []),
+            "images": []
+        }
+        
+        # Limit table rows to prevent huge responses
+        for table in page_visual.get("tables", []):
+            table_copy = {
+                "table_id": table.get("table_id"),
+                "page": table.get("page"),
+                "rows": table.get("rows", [])[:50],  # Limit to 50 rows
+                "row_count": table.get("row_count"),
+                "col_count": table.get("col_count")
+            }
+            result["tables"].append(table_copy)
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading visual data: {str(e)}")
 
 @app.delete("/documents/{doc_id}")
 def delete_document(doc_id: str):
@@ -752,6 +965,7 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
             citations=[],
             not_found=True,
             provider=provider_name,
+            visual_data=None,
         )
 
     # Generate response
@@ -770,6 +984,7 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
             citations=[],
             not_found=True,
             provider=provider_name,
+            visual_data=None,
         )
 
     # Parse + validate JSON
@@ -783,6 +998,7 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
             citations=[],
             not_found=True,
             provider=provider_name,
+            visual_data=None,
         )
 
     # Validate citations
@@ -816,6 +1032,11 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
         print(f"[WARN] Numeric citation enforcement failed: {e}")
 
     data["provider"] = provider.get_provider_name()
+    
+    # Retrieve visual data for cited pages
+    visual_data = _get_visual_data_for_citations(data.get("citations", []), metas)
+    if visual_data:
+        data["visual_data"] = visual_data
 
     try:
         return AskResponse(**data)
@@ -827,6 +1048,7 @@ def _generate_response(question: str, top_k: int, provider_name: str, docs: List
             citations=[],
             not_found=True,
             provider=provider_name,
+            visual_data=None,
         )
 
 

@@ -2,11 +2,28 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 type Citation = {
   chunk_id: string;
   page: number;
   quote: string;
+};
+
+type VisualData = {
+  tables?: Array<{
+    table_id: string;
+    page: number;
+    rows: any[][];
+    row_count: number;
+    col_count: number;
+  }>;
+  charts?: Array<{
+    page: number;
+    analysis: any;
+    model: string;
+  }>;
+  images?: any[];
 };
 
 type AskResponse = {
@@ -15,6 +32,7 @@ type AskResponse = {
   citations: Citation[];
   not_found: boolean;
   provider?: string;
+  visual_data?: VisualData;
 };
 
 type ComparisonResponse = {
@@ -177,8 +195,24 @@ export default function Page() {
           // Check if the document is processed
           const activeDoc = data.documents.find((d: any) => d.id === data.active_document_id);
           if (activeDoc && activeDoc.status === "processed") {
-            // Refresh questions based on the new document
-            await updateSuggestedQuestions();
+            // Clear conversation when switching documents (but don't reset questions yet)
+            clearConversation(false); // Don't reset questions - let updateSuggestedQuestions handle it
+            // Refresh questions based on the new document (with a small delay to ensure collection is ready)
+            setTimeout(async () => {
+              try {
+                console.log("Updating suggested questions for new active document...");
+                // Check if backend is available first
+                const healthCheck = await fetch(`${API_BASE}/health`).catch(() => null);
+                if (healthCheck && healthCheck.ok) {
+                  await updateSuggestedQuestions();
+                } else {
+                  console.warn("Backend not available, skipping suggested questions update");
+                }
+              } catch (err) {
+                console.error("Failed to update suggested questions:", err);
+                // Silently fail - this is a background operation
+              }
+            }, 500);
           }
         }
       }
@@ -225,7 +259,24 @@ export default function Page() {
             } else if (doc.status === "processed") {
               // If this document became active and is now processed, refresh questions
               if (updatedDocs.active_document_id === doc.id) {
-                await updateSuggestedQuestions();
+                // Clear conversation when new document is processed (but don't reset questions yet)
+                clearConversation(false); // Don't reset questions - let updateSuggestedQuestions handle it
+                // Wait a bit for the collection to be fully ready, then update questions
+                setTimeout(async () => {
+                  try {
+                    console.log("Updating suggested questions for newly processed document...");
+                    // Check if backend is available first
+                    const healthCheck = await fetch(`${API_BASE}/health`).catch(() => null);
+                    if (healthCheck && healthCheck.ok) {
+                      await updateSuggestedQuestions();
+                    } else {
+                      console.warn("Backend not available, skipping suggested questions update");
+                    }
+                  } catch (err) {
+                    console.error("Failed to update suggested questions:", err);
+                    // Silently fail - this is a background operation
+                  }
+                }, 1000);
               }
             }
           }
@@ -347,11 +398,10 @@ export default function Page() {
 
   async function updateSuggestedQuestionsWithHistory(history: Array<{question: string; answer: string; citations: Citation[]}>, lastQuestion?: string, lastAnswer?: string) {
     setLoadingSuggestions(true);
+    // Declare historyToSend outside try block so it's accessible in catch
+    const historyToSend = history;
+    
     try {
-      // Use the provided history - it already includes the latest Q&A if it was just added
-      // Only append if we're calling this from elsewhere with new question/answer not yet in history
-      const historyToSend = history;
-
       const res = await fetch(`${API_BASE}/suggest-questions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -363,21 +413,39 @@ export default function Page() {
 
       if (res.ok) {
         const data = await res.json();
-        if (data.questions && Array.isArray(data.questions)) {
+        if (data.questions && Array.isArray(data.questions) && data.questions.length > 0) {
+          console.log("✅ Updated suggested questions:", data.questions);
           setSuggestedQuestions(data.questions);
+        } else {
+          console.warn("⚠️ Received empty or invalid questions array");
+          // If no conversation history, keep defaults; otherwise keep current
+          if (historyToSend.length === 0) {
+            console.log("No conversation history, keeping default questions");
+          }
         }
       } else {
-        // If request fails, keep current suggestions or use defaults
-        console.warn("Failed to fetch suggested questions, using defaults");
+        // If request fails, log the error for debugging
+        let errorText = "";
+        try {
+          errorText = await res.text();
+        } catch (e) {
+          errorText = "Could not read error response";
+        }
+        console.error("❌ Failed to fetch suggested questions:", res.status, errorText);
+        // Only fall back to defaults if we have no conversation history (new document)
+        if (historyToSend.length === 0) {
+          console.log("No conversation history, keeping default questions");
+        }
       }
     } catch (err) {
-      // Silently handle fetch errors (network issues, backend down, etc.)
-      // Keep current suggestions - don't break the UI
-      console.warn("Failed to fetch suggested questions:", err);
-      // Only fall back to defaults if we have no suggestions at all
-      if (suggestedQuestions.length === 0) {
-        setSuggestedQuestions(SUGGESTED_QUESTIONS);
+      // Log errors for debugging
+      console.error("❌ Error fetching suggested questions:", err);
+      // Only fall back to defaults if we have no suggestions at all and no conversation history
+      if (historyToSend.length === 0) {
+        console.log("No conversation history, keeping default questions");
       }
+      // Don't show error to user - this is a background operation
+      // The suggested questions will just stay as they are
     } finally {
       setLoadingSuggestions(false);
     }
@@ -388,9 +456,11 @@ export default function Page() {
     await updateSuggestedQuestionsWithHistory(conversationHistory, lastQuestion, lastAnswer);
   }
 
-  function clearConversation() {
+  function clearConversation(resetQuestions: boolean = true) {
     setConversationHistory([]);
-    setSuggestedQuestions(SUGGESTED_QUESTIONS); // Reset to default questions
+    if (resetQuestions) {
+      setSuggestedQuestions(SUGGESTED_QUESTIONS); // Reset to default questions
+    }
     setExpandedTurns(new Set());
     setData(null);
     setComparisonData(null);
@@ -1303,6 +1373,62 @@ export default function Page() {
                           </div>
                         )}
 
+                        {/* Visual Data Display for Comparison */}
+                        {response.visual_data && (
+                          <div className="mb-4 space-y-4">
+                            {response.visual_data.tables && response.visual_data.tables.length > 0 && (
+                              <div>
+                                <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
+                                  Tables
+                                </div>
+                                {response.visual_data.tables.map((table, idx) => (
+                                  <div key={idx} className="mb-2 bg-zinc-900/40 rounded-lg p-3 overflow-x-auto">
+                                    <div className="text-xs text-zinc-500 mb-1">Page {table.page}</div>
+                                    <table className="min-w-full text-xs text-zinc-300">
+                                      <thead>
+                                        {table.rows[0] && (
+                                          <tr className="border-b border-zinc-700">
+                                            {table.rows[0].slice(0, 5).map((cell: any, colIdx: number) => (
+                                              <th key={colIdx} className="px-2 py-1 text-left font-semibold">
+                                                {cell || ""}
+                                              </th>
+                                            ))}
+                                          </tr>
+                                        )}
+                                      </thead>
+                                      <tbody>
+                                        {table.rows.slice(1, 6).map((row: any[], rowIdx: number) => (
+                                          <tr key={rowIdx} className="border-b border-zinc-800">
+                                            {row.slice(0, 5).map((cell: any, colIdx: number) => (
+                                              <td key={colIdx} className="px-2 py-1">
+                                                {cell || ""}
+                                              </td>
+                                            ))}
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {response.visual_data.charts && response.visual_data.charts.length > 0 && (
+                              <div>
+                                <div className="text-xs font-medium uppercase tracking-wide text-zinc-400 mb-2">
+                                  Chart Analysis
+                                </div>
+                                {response.visual_data.charts.map((chart, idx) => (
+                                  <div key={idx} className="mb-2 bg-zinc-900/40 rounded-lg p-3 text-xs text-zinc-300">
+                                    {chart.analysis?.insights && (
+                                      <div>{chart.analysis.insights}</div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <details className="mt-4">
                           <summary className="cursor-pointer text-xs font-medium text-zinc-400 hover:text-zinc-200">
                             Sources ({response.citations?.length ?? 0})
@@ -1380,6 +1506,94 @@ export default function Page() {
                         <li key={i}>{kp}</li>
                       ))}
                     </ul>
+                  </div>
+                )}
+
+                {/* Visual Data Display */}
+                {data.visual_data && (
+                  <div className="space-y-6">
+                    {/* Tables */}
+                    {data.visual_data.tables && data.visual_data.tables.length > 0 && (
+                      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
+                        <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+                          Tables from Source
+                        </div>
+                        {data.visual_data.tables.map((table, idx) => (
+                          <div key={idx} className="mb-4 bg-zinc-950/40 rounded-lg p-4 overflow-x-auto">
+                            <div className="text-xs text-zinc-500 mb-2">Page {table.page} • {table.row_count} rows × {table.col_count} columns</div>
+                            <table className="min-w-full text-sm text-zinc-300">
+                              <thead>
+                                {table.rows[0] && (
+                                  <tr className="border-b border-zinc-700">
+                                    {table.rows[0].map((cell: any, colIdx: number) => (
+                                      <th key={colIdx} className="px-3 py-2 text-left font-semibold text-zinc-200">
+                                        {cell || ""}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                )}
+                              </thead>
+                              <tbody>
+                                {table.rows.slice(1, 11).map((row: any[], rowIdx: number) => (
+                                  <tr key={rowIdx} className="border-b border-zinc-800">
+                                    {row.map((cell: any, colIdx: number) => (
+                                      <td key={colIdx} className="px-3 py-2">
+                                        {cell || ""}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {table.row_count > 11 && (
+                              <div className="text-xs text-zinc-500 mt-2">
+                                Showing first 10 rows of {table.row_count} total rows
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {/* Charts */}
+                    {data.visual_data.charts && data.visual_data.charts.length > 0 && (
+                      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7">
+                        <div className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
+                          Chart Analysis
+                        </div>
+                        {data.visual_data.charts.map((chart, idx) => (
+                          <div key={idx} className="mb-4 bg-zinc-950/40 rounded-lg p-4">
+                            <div className="text-xs text-zinc-500 mb-2">Page {chart.page}</div>
+                            {chart.analysis && (
+                              <div className="space-y-2 text-sm text-zinc-300">
+                                {chart.analysis.title && (
+                                  <div><span className="font-semibold">Title:</span> {chart.analysis.title}</div>
+                                )}
+                                {chart.analysis.chart_type && (
+                                  <div><span className="font-semibold">Type:</span> {chart.analysis.chart_type}</div>
+                                )}
+                                {chart.analysis.insights && (
+                                  <div className="mt-2">
+                                    <span className="font-semibold">Insights:</span>
+                                    <div className="mt-1 text-zinc-400">{chart.analysis.insights}</div>
+                                  </div>
+                                )}
+                                {chart.analysis.data_points && Array.isArray(chart.analysis.data_points) && chart.analysis.data_points.length > 0 && (
+                                  <div className="mt-3">
+                                    <span className="font-semibold">Key Data Points:</span>
+                                    <ul className="list-disc list-inside mt-1 text-zinc-400">
+                                      {chart.analysis.data_points.slice(0, 5).map((point: any, i: number) => (
+                                        <li key={i}>{JSON.stringify(point)}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 

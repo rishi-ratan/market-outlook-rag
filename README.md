@@ -175,6 +175,8 @@ Open your browser to: **http://localhost:3000**
 - `TOGETHER_API_KEY`: Required for Together AI/Qwen provider
 - `TOGETHER_MODEL`: Optional, defaults to `Qwen/Qwen2.5-72B-Instruct`
 - `OPENAI_MODEL`: Optional, defaults to `gpt-4o-mini`
+- `ENABLE_VISION_ANALYSIS`: Optional, set to `true` to enable GPT-4 Vision for chart analysis (default: `false`)
+- `OPENAI_VISION_MODEL`: Optional, vision model to use: `gpt-4o-mini` (cheapest), `gpt-4o` (best quality), or `gpt-4-turbo` (default: `gpt-4o-mini`)
 - `ALLOWED_ORIGINS`: CORS origins (comma-separated)
 - `CHROMA_DIR`: Path to ChromaDB storage (defaults to `storage/chroma`)
 
@@ -283,11 +285,34 @@ The system automatically:
 - Verify backend is running and accessible
 - Check network tab for SSE connection
 
+## 🚀 Deployment
+
+Deploy your RAG application to production for free using Vercel (frontend) and Railway/Render (backend).
+
+### Quick Start
+See [QUICK_DEPLOY.md](./QUICK_DEPLOY.md) for a 5-minute deployment guide.
+
+### Detailed Guide
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for comprehensive deployment instructions including:
+- Railway setup (recommended)
+- Render setup (alternative)
+- Environment variable configuration
+- CORS setup
+- Troubleshooting
+
+### Deployment Architecture
+- **Frontend**: Vercel (free tier, unlimited deployments)
+- **Backend**: Railway or Render (free tier available)
+- **Storage**: ChromaDB and PDFs stored on backend server (persistent)
+
 ## 📚 Documentation
 
 - [HOW_TO_RUN.md](HOW_TO_RUN.md) - Detailed setup instructions
+- [QUICK_DEPLOY.md](QUICK_DEPLOY.md) - Quick deployment guide
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Comprehensive deployment guide
 - [QWEN_COMPARISON.md](QWEN_COMPARISON.md) - Multi-LLM setup guide
 - [STREAMING_FEATURE.md](STREAMING_FEATURE.md) - Streaming documentation
+- [VISION_SETUP.md](VISION_SETUP.md) - GPT-4 Vision setup guide
 - [IMPROVEMENTS_ROADMAP.md](IMPROVEMENTS_ROADMAP.md) - Future enhancements
 
 ## 🤝 Contributing

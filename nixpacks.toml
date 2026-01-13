@@ -1,0 +1,7 @@
+# This file prevents Railway from using Nixpacks/Railpack
+# Railway will use Docker instead when it detects a Dockerfile
+[phases.setup]
+nixPkgs = []
+
+[build]
+builder = "dockerfile"

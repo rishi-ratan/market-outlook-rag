@@ -1,0 +1,11 @@
+apps/api/
+ingestion/
+data/
+storage/
+*.md
+!README.md
+!DEPLOYMENT.md
+!QUICK_DEPLOY.md
+.gitignore
+railway.json
+render.yaml

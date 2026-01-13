@@ -2,7 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install deps
+# Install system dependencies for PDF processing
+RUN apt-get update && apt-get install -y \
+    poppler-utils \
+    tesseract-ocr \
+    libtesseract-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps
 COPY apps/api/requirements.txt /app/apps/api/requirements.txt
 RUN pip install --no-cache-dir -r /app/apps/api/requirements.txt
 
@@ -18,8 +25,10 @@ RUN chmod +x /app/start.sh
 ENV PYTHONPATH=/app
 EXPOSE 8000
 
-# Create storage directory
-RUN mkdir -p /app/storage/chroma
+# Create storage directories
+RUN mkdir -p /app/storage/chroma \
+    && mkdir -p /app/storage/uploads \
+    && mkdir -p /app/storage/visual_data
 
 # Use startup script that builds index if needed
 CMD ["/app/start.sh"]
