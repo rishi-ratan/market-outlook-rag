@@ -84,8 +84,10 @@ echo "=========================================="
 
 # Use PORT environment variable if set (Railway/Render), otherwise default to 8000
 # Railway automatically sets PORT (usually 8080), so we use it directly
-# Use exec to replace shell process with uvicorn
+# Use exec to replace shell process with uvicorn (this ensures signals are handled correctly)
 echo "About to start uvicorn..."
 echo "Command: python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info"
-python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info
+echo "=========================================="
+# Use exec so uvicorn becomes PID 1 and receives signals properly
+exec python3 -m uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT} --log-level info
 
