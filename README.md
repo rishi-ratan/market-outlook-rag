@@ -142,9 +142,17 @@ Open your browser to: **http://localhost:3000**
 3. Type your question and click "Compare"
 4. View side-by-side responses from both providers
 
+### Document Management
+- **Upload Documents**: Click "Documents" button to open the document management panel
+- **Drag & Drop**: Drag PDF files into the upload area or click to select
+- **Document Status**: See processing status (uploading, processing, processed, error)
+- **Switch Documents**: Click "Activate" on any document to make it active
+- **Delete Documents**: Remove documents and their associated data with "Delete"
+- **Active Document**: The current active document is highlighted and used for all queries
+
 ### Conversation Features
 - **Follow-up Questions**: Ask contextual questions like "Tell me more about that" - the system remembers previous Q&A
-- **Dynamic Suggestions**: Suggested questions update automatically based on your conversation
+- **Dynamic Suggestions**: Suggested questions update automatically based on your conversation and the active document's content
 - **View Full History**: Expand any conversation turn to see the complete answer
 - **Citation Buttons**: Each answer shows clickable citation buttons (e.g., "Pg 5", "Pg 12") in conversation history
 - **Copy Conversation**: Click "Copy" to copy the entire conversation to clipboard (includes all citations)
@@ -176,7 +184,13 @@ Open your browser to: **http://localhost:3000**
 - `POST /ask/stream` - Streaming single provider query (supports conversation history)
 - `POST /ask/compare` - Comparison query (non-streaming, supports conversation history)
 - `POST /ask/compare/stream` - Streaming comparison query (supports conversation history)
-- `POST /suggest-questions` - Generate contextual follow-up questions based on conversation history
+- `POST /suggest-questions` - Generate contextual follow-up questions based on conversation history and document content
+- `GET /documents` - List all documents and get active document ID
+- `POST /documents/upload` - Upload and process a new PDF document
+- `POST /documents/{doc_id}/activate` - Set a document as active
+- `DELETE /documents/{doc_id}` - Delete a document and its associated data
+- `GET /documents/{doc_id}/pdf` - Serve a specific document's PDF file
+- `GET /documents/active/pdf` - Serve the active document's PDF file
 
 ## 📁 Project Structure
 
@@ -197,8 +211,10 @@ market-outlook-rag/
 │   └── chunking.py       # Text chunking
 ├── data/                 # Source documents
 │   └── report.pdf
-├── storage/              # ChromaDB storage
-│   └── chroma/
+├── storage/              # Application storage
+│   ├── chroma/           # ChromaDB storage (per-document collections)
+│   ├── uploads/          # Uploaded PDF files
+│   └── documents_metadata.json  # Document metadata
 └── .env                  # Environment variables
 ```
 
