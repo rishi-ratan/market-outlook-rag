@@ -530,6 +530,47 @@ The system automatically:
 - Format: `https://app.vercel.app,http://localhost:3000`
 - Redeploy backend after updating CORS settings
 
+### Vercel Deployment Issues
+
+**404 Error or Build Fails:**
+1. **Check Root Directory**: Go to Vercel Dashboard → Settings → General
+   - **Root Directory**: Must be set to `apps/web` ⚠️ **MOST IMPORTANT**
+   - If set to `.` (root), change it to `apps/web` and redeploy
+2. **Verify Project Structure**: Vercel should see `package.json`, `app/` directory, and `next.config.ts` in `apps/web/`
+3. **Check Build Logs**: Go to Deployments → Click failed deployment → View Build Logs for specific errors
+
+**Environment Variables Not Set:**
+1. Go to Vercel Dashboard → Settings → Environment Variables
+2. Add: `NEXT_PUBLIC_API_BASE` with your backend URL
+3. **Important**: Select all environments (Production, Preview, Development)
+4. Save and redeploy
+
+**Build Command Fails:**
+1. **Test Build Locally**:
+   ```bash
+   cd apps/web
+   npm install
+   npm run build
+   ```
+2. Fix any TypeScript errors or missing dependencies locally first
+3. Common issues:
+   - TypeScript errors → Fix in code
+   - Missing dependencies → Check `package.json`
+   - "Cannot find module" → Install missing package
+
+**Wrong Branch Connected:**
+1. Go to Settings → Git
+2. Verify correct repository: `rishi-ratan/market-outlook-rag`
+3. Verify correct branch: `rag-docs` (or your active branch)
+4. Auto-deploy should be enabled
+
+**Quick Vercel Fix Checklist:**
+- ✅ Root Directory = `apps/web` (not `.`)
+- ✅ `NEXT_PUBLIC_API_BASE` environment variable set
+- ✅ Correct branch connected
+- ✅ Build succeeds locally (`npm run build` in `apps/web`)
+- ✅ Check build logs for specific errors
+
 ## 📚 Additional Resources
 
 - [IMPROVEMENTS_ROADMAP.md](IMPROVEMENTS_ROADMAP.md) - Future enhancements and roadmap
