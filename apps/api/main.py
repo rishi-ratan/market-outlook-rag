@@ -607,8 +607,45 @@ def process_document(pdf_path: str, doc_id: str, use_vision: bool = False) -> di
 def list_documents():
     """List all uploaded documents."""
     meta = load_documents_metadata()
+    documents = meta.get("documents", [])
+    
+    # Check if any "processing" documents actually have collections (fix stuck status)
+    ch = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    for doc in documents:
+        if doc.get("status") == "processing":
+            collection_name = f"doc_{doc['id']}"
+            try:
+                collection = ch.get_collection(name=collection_name)
+                count = collection.count()
+                if count > 0:
+                    # Document was processed but status wasn't updated - fix it
+                    print(f"[AUTO-FIX] Document {doc['id']} has {count} chunks but status is 'processing'. Fixing...")
+                    doc["status"] = "processed"
+                    doc["chunks"] = count
+                    # Try to get page count from collection metadata
+                    try:
+                        sample = collection.get(limit=1)
+                        if sample.get("metadatas") and sample["metadatas"][0].get("page"):
+                            # Estimate pages from metadata
+                            all_results = collection.get(limit=count)
+                            pages = set()
+                            for meta_item in all_results.get("metadatas", []):
+                                if "page" in meta_item:
+                                    pages.add(meta_item["page"])
+                            doc["pages"] = len(pages) if pages else 0
+                    except:
+                        doc["pages"] = 0
+            except:
+                # Collection doesn't exist yet, still processing
+                pass
+    
+    # Save fixed metadata
+    if any(d.get("status") == "processed" for d in documents):
+        meta["documents"] = documents
+        save_documents_metadata(meta)
+    
     return {
-        "documents": meta.get("documents", []),
+        "documents": documents,
         "active_document_id": meta.get("active_document_id")
     }
 
