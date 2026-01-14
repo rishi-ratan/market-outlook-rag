@@ -744,23 +744,49 @@ async def upload_document(file: UploadFile = File(...)):
     
     # Process document asynchronously
     def process_async():
-        # Enable vision analysis (set to False to disable and save costs)
-        # Vision analysis uses GPT-4 Vision API which is more expensive
-        use_vision = os.getenv("ENABLE_VISION_ANALYSIS", "false").lower() == "true"
-        result = process_document(str(file_path), doc_id, use_vision=use_vision)
-        meta = load_documents_metadata()
-        documents = meta.get("documents", [])
-        doc = next((d for d in documents if d["id"] == doc_id), None)
-        if doc:
-            if result["success"]:
-                doc["status"] = "processed"
-                doc["chunks"] = result["total_chunks"]
-                doc["pages"] = result["total_pages"]
+        try:
+            # Enable vision analysis (set to False to disable and save costs)
+            # Vision analysis uses GPT-4 Vision API which is more expensive
+            use_vision = os.getenv("ENABLE_VISION_ANALYSIS", "false").lower() == "true"
+            print(f"[BACKGROUND] Starting to process document {doc_id}...")
+            result = process_document(str(file_path), doc_id, use_vision=use_vision)
+            print(f"[BACKGROUND] Processing complete for {doc_id}. Success: {result.get('success')}")
+            
+            meta = load_documents_metadata()
+            documents = meta.get("documents", [])
+            doc = next((d for d in documents if d["id"] == doc_id), None)
+            if doc:
+                if result["success"]:
+                    doc["status"] = "processed"
+                    doc["chunks"] = result["total_chunks"]
+                    doc["pages"] = result["total_pages"]
+                    print(f"[BACKGROUND] Updated document {doc_id} status to 'processed' with {result['total_chunks']} chunks")
+                else:
+                    doc["status"] = "error"
+                    doc["error"] = result.get("error", "Unknown error")
+                    print(f"[BACKGROUND] Updated document {doc_id} status to 'error': {result.get('error')}")
             else:
-                doc["status"] = "error"
-                doc["error"] = result.get("error", "Unknown error")
-        meta["documents"] = documents
-        save_documents_metadata(meta)
+                print(f"[BACKGROUND] WARNING: Document {doc_id} not found in metadata!")
+            
+            meta["documents"] = documents
+            save_documents_metadata(meta)
+            print(f"[BACKGROUND] Saved metadata for document {doc_id}")
+        except Exception as e:
+            print(f"[BACKGROUND] ERROR processing document {doc_id}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Try to update status to error
+            try:
+                meta = load_documents_metadata()
+                documents = meta.get("documents", [])
+                doc = next((d for d in documents if d["id"] == doc_id), None)
+                if doc:
+                    doc["status"] = "error"
+                    doc["error"] = str(e)
+                    meta["documents"] = documents
+                    save_documents_metadata(meta)
+            except:
+                pass
     
     # Start processing in background thread
     thread = threading.Thread(target=process_async)
